@@ -1,0 +1,8 @@
+# DW1000 Device A (ranging sender) - ESP-IDF
+#
+# Console (idf.py monitor) runs on UART0 at 115200 baud by default.
+# Key input for antenna-delay tuning is read from this same console UART.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
