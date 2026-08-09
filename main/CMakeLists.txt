@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES dwm1000
+    REQUIRES arduino_dw1000 arduino_shim
 )
