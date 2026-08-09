@@ -252,21 +252,35 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v);
 #define DW1000_MSG_RANGE        2   /* tag -> anchor: carries T1 / T4 / T5     */
 #define DW1000_MSG_RANGE_REPORT 3   /* anchor -> tag: computed distance (float) */
 
-#define DW1000_LEN_DATA         16     /* length of every ranging frame         */
+#define DW1000_LEN_DATA         18     /* length of every ranging frame         */
 #define DW1000_REPLY_DELAY_US   3000u  /* nominal reply delay (measured anyway) */
 #define DW1000_RANGE_TIMEOUT_MS 1000   /* tag: max wait for a result, ms        */
 
-/* Callback for the tag's ranging result. Called with the measured distance in
-   meters, or with a NEGATIVE value if no distance arrived within the timeout.
+/* Callback for the tag's ranging result.
+   - got_reading == true  : distance_m is a real measured distance (meters).
+   - got_reading == false : no distance arrived within the timeout
+                            (distance_m is -1.0f / undefined).
    Return true to accept the reading, false to reject it. */
-typedef bool (*dw1000_distance_cb_t)(float distance_m);
+typedef bool (*dw1000_distance_cb_t)(float distance_m, bool got_reading);
+
+/*
+ * Pair this device with a specific peer so it only responds to / accepts
+ * frames from that peer. peer_address is the OTHER device's short address
+ * (this device's own address is set via dw1000_config's device_address).
+ * Pass 0xFFFF to disable pairing (accept anyone) - the default.
+ */
+void dw1000_set_peer_address(uint16_t peer_address);
 
 /*
  * Run ONE ranging exchange as the tag (initiator): sends a POLL and blocks up
  * to timeout_ms waiting for the RANGE_REPORT, then calls on_distance() with the
  * result and returns the callback's return value. Single-shot - the caller
  * decides how often to call it. The radio runs interrupt-driven; only the
- * calling task blocks. Returns true if a distance was measured.
+ * calling task blocks.
+ *
+ * on_distance() is called with got_reading = true and the measured meters on
+ * success, or got_reading = false (distance_m = -1.0f) on timeout - so the
+ * caller can tell "a real reading" apart from "no data".
  */
 bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distance);
 

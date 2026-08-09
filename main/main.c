@@ -61,11 +61,15 @@ const uint8_t PIN_RST  = 32;
    dw1000_run_tag / dw1000_run_anchor - see my_dw1000.h) */
 
 /* Example result callback used by the TAG loop below. */
-static bool on_distance(float distance_m)
+static bool on_distance(float distance_m, bool got_reading)
 {
-    if (distance_m < 0.0f) {
-        ESP_LOGI("DW1000", "Too Close");
+    if (!got_reading) {
+        ESP_LOGI("DW1000", "RANGE TIMEOUT (no data)");
         return false;
+    }
+    if (distance_m < 0.05f) {   /* a real reading, but essentially touching */
+        ESP_LOGI("DW1000", "Too Close: %.3f m", (double)distance_m);
+        return true;
     }
     ESP_LOGI("DW1000", "DISTANCE: %.2f m", (double)distance_m);
     return true;
@@ -90,6 +94,7 @@ static void dw1000_radio_task(void *arg)
     /* Configure the radio (both boards must use the same channel/mode). */
     dw1000_config(0xDECA, 0x1001, DW1000_MODE_SHORTDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, 16400);
+    dw1000_set_peer_address(0x1002);   /* only range with the paired anchor */
 
     /* Run this board's role. */
     if (THIS_ROLE == ROLE_TAG) {

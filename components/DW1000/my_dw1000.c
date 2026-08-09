@@ -22,6 +22,11 @@ static const char *TAG = "DW1000";
 /* ~15.65 ps per raw timestamp tick -> meters per tick */
 #define DW1000_METERS_PER_TICK 0.0046917639786159f
 
+/* Pairing: our own short address (set by dw1000_config) and the paired peer
+   (set by dw1000_set_peer_address). peer == 0xFFFF disables pairing. */
+static uint16_t s_own_address  = 0xFFFF;
+static uint16_t s_peer_address = 0xFFFF;
+
 /* ============================ mode presets ============================ */
 
 const uint8_t DW1000_MODE_LONGDATA_RANGE_LOWPOWER[3] =
@@ -249,6 +254,7 @@ void dw1000_config(uint16_t network_id,
                    uint8_t channel,
                    uint16_t antenna_delay)
 {
+    s_own_address = device_address;   /* remember our short address (pairing) */
     dw1000_begin_config();
     dw1000_set_defaults();   /* standard defaults (also enables the IRQ events) */
 
@@ -463,6 +469,18 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v)
 /* Implementation of the ready-to-use ranging engine declared in the header.
    The tag drives the exchange; the anchor replies and computes the distance. */
 
+/* Payload layout of a ranging frame (DW1000_LEN_DATA bytes):
+     [0]     message type
+     [1-2]   source short address (little-endian) - used for pairing
+     [3-7]   T1  (RANGE only)
+     [8-12]  T4 / T2 (RANGE only)
+     [13-17] T5 / distance (RANGE / RANGE_REPORT)
+   Offsets overlap per message type; each message only uses what it needs. */
+#define DW1000_OFF_SRC 1
+#define DW1000_OFF_T1  3
+#define DW1000_OFF_T4  8
+#define DW1000_OFF_T5  13
+
 /* ranging state (file scope) */
 static uint8_t  s_data[DW1000_LEN_DATA];
 static uint8_t  s_last_sent_type;      /* tag: which frame was just transmitted */
@@ -471,6 +489,27 @@ static uint64_t s_t2, s_t3;            /* anchor: poll RX, poll_ack TX timestamp
 static volatile bool s_result_ready;   /* true when a RANGE_REPORT arrived */
 static float  s_last_distance;         /* last measured distance (m) */
 static bool   s_tag_init_done;         /* run_tag radio setup done once */
+
+/* write / read a 16-bit short address as 2 little-endian bytes */
+static void put_addr(uint8_t *buf, uint16_t addr)
+{
+    buf[0] = (uint8_t)(addr & 0xFF);
+    buf[1] = (uint8_t)((addr >> 8) & 0xFF);
+}
+
+static uint16_t get_addr(const uint8_t *buf)
+{
+    return (uint16_t)(buf[0] | ((uint16_t)buf[1] << 8));
+}
+
+/* true if the received frame came from the paired peer (or pairing is off) */
+static bool is_peer(const uint8_t *frame)
+{
+    if (s_peer_address == 0xFFFF) {
+        return true;
+    }
+    return get_addr(frame + DW1000_OFF_SRC) == s_peer_address;
+}
 
 /* write a 40-bit timestamp into 5 little-endian bytes */
 static void put_ts(uint8_t *buf, uint64_t ts)
@@ -516,8 +555,8 @@ static void tag_on_sent(void)
 static void tag_on_received(void)
 {
     uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
-    if (len < 1) {
-        return;
+    if (len < 1 || !is_peer(s_data)) {
+        return;   /* not our paired anchor (or empty): ignore */
     }
 
     if (s_data[0] == DW1000_MSG_POLL_ACK) {
@@ -529,13 +568,14 @@ static void tag_on_received(void)
         uint64_t t5 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
 
         s_data[0] = DW1000_MSG_RANGE;
-        put_ts(s_data + 1,  s_t1);
-        put_ts(s_data + 6,  t4);
-        put_ts(s_data + 11, t5);
+        put_addr(s_data + DW1000_OFF_SRC, s_own_address);
+        put_ts(s_data + DW1000_OFF_T1, s_t1);
+        put_ts(s_data + DW1000_OFF_T4, t4);
+        put_ts(s_data + DW1000_OFF_T5, t5);
         s_last_sent_type = DW1000_MSG_RANGE;
         dw1000_send_at_ticks(s_data, DW1000_LEN_DATA, target);
     } else if (s_data[0] == DW1000_MSG_RANGE_REPORT) {
-        memcpy(&s_last_distance, s_data + 1, sizeof(s_last_distance));
+        memcpy(&s_last_distance, s_data + DW1000_OFF_T1, sizeof(s_last_distance));
         s_result_ready = true;
         dw1000_start_receive();   /* re-arm for the next exchange */
     }
@@ -557,6 +597,7 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
     s_result_ready = false;
     memset(s_data, 0, sizeof(s_data));
     s_data[0] = DW1000_MSG_POLL;
+    put_addr(s_data + DW1000_OFF_SRC, s_own_address);
     s_last_sent_type = DW1000_MSG_POLL;
     dw1000_send(s_data, DW1000_LEN_DATA);
 
@@ -569,7 +610,7 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
 
     ok = s_result_ready;
     if (on_distance != NULL) {
-        return on_distance(ok ? s_last_distance : -1.0f);
+        return on_distance(ok ? s_last_distance : -1.0f, ok);
     }
     return ok;
 }
@@ -579,8 +620,8 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
 static void anchor_on_received(void)
 {
     uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
-    if (len < 1) {
-        return;
+    if (len < 1 || !is_peer(s_data)) {
+        return;   /* not our paired tag (or empty): ignore */
     }
 
     if (s_data[0] == DW1000_MSG_POLL) {
@@ -592,12 +633,13 @@ static void anchor_on_received(void)
         s_t3 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
 
         s_data[0] = DW1000_MSG_POLL_ACK;
+        put_addr(s_data + DW1000_OFF_SRC, s_own_address);
         dw1000_send_at_ticks(s_data, DW1000_LEN_DATA, target);
     } else if (s_data[0] == DW1000_MSG_RANGE) {
         /* we have T2/T3; RANGE carries T1/T4/T5; measure T6 now */
-        uint64_t t1 = get_ts(s_data + 1);
-        uint64_t t4 = get_ts(s_data + 6);
-        uint64_t t5 = get_ts(s_data + 11);
+        uint64_t t1 = get_ts(s_data + DW1000_OFF_T1);
+        uint64_t t4 = get_ts(s_data + DW1000_OFF_T4);
+        uint64_t t5 = get_ts(s_data + DW1000_OFF_T5);
         uint64_t t6 = dw1000_get_rx_timestamp();
 
         /* asymmetric DS-TWR (arduino-dw1000 computeRangeAsymmetric) */
@@ -614,7 +656,8 @@ static void anchor_on_received(void)
 
         /* send the computed range back to the tag */
         s_data[0] = DW1000_MSG_RANGE_REPORT;
-        memcpy(s_data + 1, &range, sizeof(range));
+        put_addr(s_data + DW1000_OFF_SRC, s_own_address);
+        memcpy(s_data + DW1000_OFF_T1, &range, sizeof(range));
         dw1000_send(s_data, DW1000_LEN_DATA);
     }
 }
@@ -629,4 +672,9 @@ void dw1000_run_anchor(int irq_gpio)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+}
+
+void dw1000_set_peer_address(uint16_t peer_address)
+{
+    s_peer_address = peer_address;
 }
