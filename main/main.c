@@ -5,9 +5,8 @@
  * reachable over SPI. The firmware initializes the SPI bus / driver and reads
  * the DW1000 device registers ("probe").
  *
- * The DW1000 driver itself is a C++ library (arduino-dw1000). It is exposed
- * to this C file through the plain C API in dw1000_c.h (see
- * components/arduino_dw1000).
+ * All DW1000 logic lives in the pure-C component library "DW1000"
+ * (components/DW1000/my_dw1000.h) - plain C functions only, no classes.
  *
  * Wiring (Adafruit Feather ESP32  <->  DW1000 / DWM1000):
  *   SCK  (GPIO 25)  <-> SPICLK
@@ -34,7 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "dw1000_c.h"
+#include "my_dw1000.h"
 
 /* DW1000 wiring on the Adafruit Feather ESP32 */
 const uint8_t PIN_SCK  = 25;
@@ -44,51 +43,19 @@ const uint8_t PIN_CS   = 14;
 const uint8_t PIN_IRQ  = 13;
 const uint8_t PIN_RST  = 32;
 
-static void probe(void)
-{
-    char msg[128];
-
-    /* Device identifier register (0x00). A real DW1000 returns 0xDECA0130,
-       so the printed string always starts with "DECA". */
-    dw1000_get_device_id(msg);
-
-    if (strncmp(msg, "DECA", 4) == 0) {
-        printf("==============================================\n");
-        printf(">>>  DW1000 MODULE DETECTED - SPI OK!  <<<\n");
-        printf("==============================================\n");
-        printf("Device ID  : %s\n", msg);
-
-        dw1000_get_eui(msg);
-        printf("Unique ID  : %s\n", msg);
-
-        dw1000_get_net_addr(msg);
-        printf("Net/Addr   : %s\n", msg);
-
-        dw1000_get_device_mode(msg);
-        printf("Device mode: %s\n", msg);
-    } else {
-        printf("**********************************************\n");
-        printf(">>>  NO DW1000 RESPONSE - check wiring/power!\n");
-        printf(">>>  Register read as: %s\n", msg);
-        printf("**********************************************\n");
-    }
-}
-
 static void dw1000_probe_task(void *arg)
 {
     printf("==================================\n");
     printf("========= DEVICE A (probe) =======\n");
     printf("==================================\n");
 
-    /* Assign the custom SPI pins (required on ESP32). */
-    dw1000_set_spi_pins(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+    /* Init the SPI bus / driver and select the chip. */
+    dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST);
 
-    /* Initialize the driver and select/reset the chip. */
-    dw1000_begin(PIN_IRQ, PIN_RST);
-    dw1000_select(PIN_CS);
-
-    printf("Driver initialized. Probing the DW1000 ...\n");
-    probe();
+    /* Probe the module and print its identity. */
+    if (dw1000_probe()) {
+        dw1000_print_device_info();
+    }
 
     /* Step 1: nothing else to do - keep the task alive. */
     while (1) {
