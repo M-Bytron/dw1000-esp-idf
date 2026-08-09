@@ -60,6 +60,12 @@ const uint8_t PIN_RST  = 32;
 #define MSG_RANGE_REPORT 3
 #define LEN_DATA         16
 #define REPLY_DELAY_US   3000u   /* nominal delay; measured, not assumed */
+#define RANGE_TIMEOUT_MS 1000    /* how long one exchange may take (ms) */
+
+/* Callback for the tag's ranging result. Called with the measured distance
+   in meters, or with a NEGATIVE value if no distance arrived within the
+   timeout. Return true to accept / false to reject. */
+typedef bool (*dw1000_distance_cb_t)(float distance_m);
 
 /* m per raw timestamp tick (c * ~15.65 ps) */
 #define DW1000_M_PER_TICK 0.0046917639786159f
@@ -99,6 +105,11 @@ static uint8_t s_last_sent_type;   /* tag: which frame was just transmitted */
 
 static uint64_t s_t1;              /* tag: poll TX timestamp */
 static uint64_t s_t2, s_t3;        /* anchor: poll RX, poll_ack TX timestamp */
+
+/* single-shot exchange result (written by the IRQ task, read by run_tag) */
+static volatile bool s_result_ready;   /* true when a RANGE_REPORT arrived */
+static float          s_last_distance; /* last measured distance (m) */
+static bool           s_tag_init_done; /* run_tag radio setup done once */
 
 static void put_ts(uint8_t *buf, uint64_t ts)
 {
@@ -161,28 +172,52 @@ static void tag_on_received(void)
         s_last_sent_type = MSG_RANGE;
         dw1000_send_at_ticks(s_data, LEN_DATA, target);
     } else if (s_data[0] == MSG_RANGE_REPORT) {
-        float range = 0.0f;
-        memcpy(&range, s_data + 1, sizeof(range));
-        printf("DISTANCE: %.2f m\n", (double)range);
+        memcpy(&s_last_distance, s_data + 1, sizeof(s_last_distance));
+        s_result_ready = true;
         dw1000_start_receive();   /* re-arm for the next exchange */
     }
 }
 
-static void run_tag(void)
+/*
+ * Send ONE ranging exchange (POLL -> POLL_ACK -> RANGE -> RANGE_REPORT) and
+ * wait up to timeout_ms for the distance. Single-shot: the caller decides how
+ * often to call it. The radio runs interrupt-driven; this only blocks the
+ * calling task.
+ *
+ * Returns the callback's value: on success the callback receives the measured
+ * distance in meters, on timeout a NEGATIVE value so it can return false.
+ */
+bool run_tag(int timeout_ms, dw1000_distance_cb_t on_distance)
 {
-    printf("--- ROLE: TAG (DS-TWR initiator) ---\n");
-    dw1000_irq_start(PIN_IRQ);
-    dw1000_receive_permanently(true);
-    dw1000_on_sent(tag_on_sent);
-    dw1000_on_received(tag_on_received);
+    bool ok;
 
-    while (1) {
-        memset(s_data, 0, sizeof(s_data));
-        s_data[0] = MSG_POLL;
-        s_last_sent_type = MSG_POLL;
-        dw1000_send(s_data, LEN_DATA);
-        vTaskDelay(pdMS_TO_TICKS(500));
+    if (!s_tag_init_done) {
+        s_tag_init_done = true;
+        dw1000_irq_start(PIN_IRQ);
+        dw1000_receive_permanently(true);
+        dw1000_on_sent(tag_on_sent);
+        dw1000_on_received(tag_on_received);
     }
+
+    /* start one exchange */
+    s_result_ready = false;
+    memset(s_data, 0, sizeof(s_data));
+    s_data[0] = MSG_POLL;
+    s_last_sent_type = MSG_POLL;
+    dw1000_send(s_data, LEN_DATA);
+
+    /* wait for the result or the timeout */
+    TickType_t t0 = xTaskGetTickCount();
+    while (!s_result_ready &&
+           (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    ok = s_result_ready;
+    if (on_distance != NULL) {
+        return on_distance(ok ? s_last_distance : -1.0f);
+    }
+    return ok;
 }
 
 /* ---- ANCHOR (responder): replies, computes DS-TWR, sends the range ---- */
@@ -243,6 +278,17 @@ static void run_anchor(void)
     }
 }
 
+/* Example result callback used by the TAG loop below. */
+static bool on_distance(float distance_m)
+{
+    if (distance_m < 0.0f) {
+        ESP_LOGI("DW1000", "Too Close");
+        return false;
+    }
+    ESP_LOGI("DW1000", "DISTANCE: %.2f m", (double)distance_m);
+    return true;
+}
+
 static void dw1000_radio_task(void *arg)
 {
     printf("==================================\n");
@@ -264,7 +310,11 @@ static void dw1000_radio_task(void *arg)
 
     /* Run this board's role. */
     if (THIS_ROLE == ROLE_TAG) {
-        run_tag();
+        printf("--- ROLE: TAG (DS-TWR initiator) ---\n");
+        while (1) {
+            run_tag(RANGE_TIMEOUT_MS, on_distance);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
     } else {
         run_anchor();
     }
