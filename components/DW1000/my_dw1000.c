@@ -733,6 +733,7 @@ static void anchor_on_received(void)
         int64_t den = round1 + round2 + reply1 + reply2;
         int64_t tof = (den != 0) ? (num / den) : 0;
         float range = (float)tof * DW1000_METERS_PER_TICK;
+        s_last_distance = range;   /* remember so calibration can use it */
 
         ESP_LOGI(TAG, "RANGE OK: %.2f m", (double)range);
 
@@ -776,4 +777,55 @@ void dw1000_set_peer_eui(const uint8_t peer_mac[6])
     ESP_LOGI(TAG, "Paired with peer BLE MAC %02X:%02X:%02X:%02X:%02X:%02X",
              (unsigned)peer_mac[0], (unsigned)peer_mac[1], (unsigned)peer_mac[2],
              (unsigned)peer_mac[3], (unsigned)peer_mac[4], (unsigned)peer_mac[5]);
+}
+
+/*
+ * Antenna-delay calibration (mirrors the arduino-dw1000 tuning procedure).
+ *
+ * Procedure: place the two modules at a KNOWN distance with clear line of
+ * sight, let at least one ranging exchange complete (so a measured distance
+ * is available), then call this with the true distance in centimetres. It
+ * corrects the antenna delay so the measured distance matches the known
+ * distance, writes the new value to the radio and returns it.
+ *
+ *   known_distance_cm = the true physical distance between the modules (cm)
+ *   return value      = the corrected antenna delay, in raw ticks (use the
+ *                       SAME value on BOTH boards)
+ *
+ * Relationship (verified against the arduino tuning steps): 1 tick of antenna
+ * delay shifts the measured range by ~DW1000_METERS_PER_TICK (0.47 cm), so a
+ * measured distance that reads too large is fixed by INCREASING the delay.
+ * Call it again after a fresh reading to refine (it converges).
+ */
+uint16_t dw1000_calibrate_antenna_delay(float known_distance_cm)
+{
+    uint16_t old_ad = dw1000_get_antenna_delay();
+    float true_m = known_distance_cm / 100.0f;
+    float meas_m = s_last_distance;
+    int32_t corr, new_ad;
+
+    if (meas_m <= 0.0f) {
+        ESP_LOGW(TAG, "Calibrate: no range reading yet, antenna delay unchanged (%u)",
+                 (unsigned)old_ad);
+        return old_ad;
+    }
+
+    /* +1 tick of antenna delay shifts the measured range by -METERS_PER_TICK,
+       so the correction (in ticks) is the measured error scaled to ticks. */
+    corr = (int32_t)((meas_m - true_m) * (1.0f / DW1000_METERS_PER_TICK));
+    new_ad = (int32_t)old_ad + corr;
+    if (new_ad < 0) {
+        new_ad = 0;
+    }
+    if (new_ad > 0xFFFF) {
+        new_ad = 0xFFFF;
+    }
+
+    dw1000_set_antenna_delay((uint16_t)new_ad);
+    dw1000_commit_config();   /* write TX_ANTD + LDE_RXANTD to the chip */
+
+    ESP_LOGI(TAG, "Calibrate: known=%.2f m measured=%.2f m -> antenna_delay %u (was %u, corr %d)",
+             (double)true_m, (double)meas_m,
+             (unsigned)new_ad, (unsigned)old_ad, (int)corr);
+    return (uint16_t)new_ad;
 }

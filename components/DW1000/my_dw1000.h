@@ -299,6 +299,16 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
  */
 void dw1000_run_anchor(int irq_gpio);
 
+/*
+ * Antenna-delay calibration. Put the two modules at a known distance (line
+ * of sight), let at least one ranging exchange complete, then call this with
+ * the true distance in cm. It corrects the antenna delay so the measured
+ * distance matches, writes it to the radio and returns the corrected value
+ * (raw ticks). Use the same value on BOTH boards. Repeat after a fresh
+ * reading to refine.
+ */
+uint16_t dw1000_calibrate_antenna_delay(float known_distance_cm);
+
 #ifdef __cplusplus
 }
 #endif

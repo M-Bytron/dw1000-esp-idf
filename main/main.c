@@ -44,6 +44,17 @@ const uint8_t PIN_CS   = 14;
 const uint8_t PIN_IRQ  = 13;
 const uint8_t PIN_RST  = 32;
 
+
+#define antenna_delay 16412
+
+/* Antenna-delay auto-calibration.
+   Set CALIBRATE_DISTANCE_CM to the TRUE physical distance between the two
+   modules in cm (place them exactly that far apart, clear line of sight), then
+   boot BOTH boards. After the tag gets its first distance reading it corrects
+   the antenna delay so the reading matches, prints the new value, and you put
+   that value into antenna_delay above on BOTH boards (then set this to 0). */
+#define CALIBRATE_DISTANCE_CM  0     /* 0 = calibration disabled */
+
 /* ===== Test role =====
    TAG  (initiator): drives the two-way ranging exchange and prints the distance.
    ANCHOR (responder): replies, computes the distance (DS-TWR), sends it back.
@@ -105,7 +116,7 @@ static void dw1000_radio_task(void *arg)
     /* Configure the radio (both boards must use the same channel/mode).
        Our own address is derived from this ESP32's BLE MAC in dw1000_config(). */
     dw1000_config(0xDECA, 0x1001, DW1000_MODE_SHORTDATA_FAST_ACCURACY,
-                  DW1000_CHANNEL_5, 16400);
+                  DW1000_CHANNEL_5, antenna_delay);
 
     /* Pair with the anchor: B's ESP32 BLE MAC (6 bytes, MSB first). */
     static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE3, 0xA4, 0x6E};
@@ -114,8 +125,15 @@ static void dw1000_radio_task(void *arg)
     /* Run this board's role. */
     if (THIS_ROLE == ROLE_TAG) {
         printf("--- ROLE: TAG (DS-TWR initiator) ---\n");
+        bool calibrated = (CALIBRATE_DISTANCE_CM <= 0);
         while (1) {
-            dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance);
+            bool got = dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance);
+            if (!calibrated && got) {
+                uint16_t ad = dw1000_calibrate_antenna_delay((float)CALIBRATE_DISTANCE_CM);
+                printf(">>> CALIBRATED antenna_delay = %u (put this in antenna_delay on BOTH boards)\n",
+                       (unsigned)ad);
+                calibrated = true;
+            }
             vTaskDelay(pdMS_TO_TICKS(500));
         }
     } else {
