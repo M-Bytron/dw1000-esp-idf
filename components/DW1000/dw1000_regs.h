@@ -141,13 +141,15 @@ extern "C" {
 
 /* ============================ SYS_CFG bits ============================ */
 
-#define DW1000_FFEN_BIT      0   /* frame filtering enable */
-#define DW1000_FFBC_BIT      1   /* frame filter: behave as coordinator */
-#define DW1000_FFAB_BIT      2   /* frame filter: allow beacon */
-#define DW1000_FFAD_BIT      3   /* frame filter: allow data */
-#define DW1000_FFAA_BIT      4   /* frame filter: allow acknowledgement */
-#define DW1000_FFAM_BIT      5   /* frame filter: allow MAC command */
-#define DW1000_FFAR_BIT      6   /* frame filter: allow reserved (blink) */
+/* Frame filtering (DW1000 User Manual). FFE is the master enable; the allow
+   bits select which destination addresses the receiver accepts. */
+#define DW1000_FFE_BIT      0   /* frame filtering master enable   */
+#define DW1000_FFEN_BIT     0   /* frame filter master enable (datasheet bit 0) */
+#define DW1000_FFBC_BIT     2   /* allow broadcast / multicast    */
+#define DW1000_FFAA_BIT     3   /* allow frames to MY short addr  */
+#define DW1000_FFAE_BIT     4   /* allow frames to MY extended EUI */
+#define DW1000_FFAD_BIT     5   /* allow frames from other PANs   */
+#define DW1000_FFAB_BIT     6   /* allow frames from my address   */
 #define DW1000_HIRQ_POL_BIT  9   /* interrupt polarity (active high) */
 #define DW1000_DIS_DRXB_BIT  12  /* disable double receive buffer */
 #define DW1000_DIS_STXP_BIT  18  /* disable smart TX power */

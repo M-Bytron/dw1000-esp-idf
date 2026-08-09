@@ -318,11 +318,16 @@ static void dw1000_ll_write_syscfg(void)
     dw1000_ll_write(DW1000_SYS_CFG, DW1000_NO_SUB, g_syscfg, DW1000_LEN_SYS_CFG);
 }
 
-/* ---- internal config helpers used by setDefaults() ---- */
+/* ---- frame filtering (hardware receive filter) ---- */
 
-static void dw1000_ll_set_frame_filter(bool val)
+void dw1000_ll_apply_frame_filter(int allow_extended, int allow_broadcast)
 {
-    dw1000_ll_set_bit(g_syscfg, DW1000_LEN_SYS_CFG, DW1000_FFEN_BIT, val);
+    int enable = (allow_extended != 0) || (allow_broadcast != 0);
+    dw1000_ll_set_bit(g_syscfg, DW1000_LEN_SYS_CFG, DW1000_FFE_BIT, enable);
+    dw1000_ll_set_bit(g_syscfg, DW1000_LEN_SYS_CFG, DW1000_FFAE_BIT, allow_extended);
+    dw1000_ll_set_bit(g_syscfg, DW1000_LEN_SYS_CFG, DW1000_FFBC_BIT, allow_broadcast);
+    dw1000_ll_set_bit(g_syscfg, DW1000_LEN_SYS_CFG, DW1000_FFAA_BIT, 0);
+    dw1000_ll_write_syscfg();
 }
 
 static void dw1000_ll_use_extended_frame_length(bool val)
@@ -406,6 +411,11 @@ void dw1000_ll_set_eui(const char *eui)
         reversed[i] = bytes[7 - i];
     }
     dw1000_ll_write(DW1000_EUI, DW1000_NO_SUB, reversed, 8);
+}
+
+void dw1000_ll_get_eui_bytes(uint8_t eui[8])
+{
+    dw1000_ll_read(DW1000_EUI, DW1000_NO_SUB, eui, 8);
 }
 
 /* ---- RF configuration ---- */
@@ -541,7 +551,7 @@ void dw1000_ll_set_defaults(void)
     dw1000_ll_use_extended_frame_length(false);
     dw1000_ll_use_smart_power(false);
     dw1000_ll_suppress_frame_check(false);
-    dw1000_ll_set_frame_filter(false);
+    dw1000_ll_apply_frame_filter(0, 0);   /* frame filtering off by default */
     dw1000_ll_interrupt_on_sent(true);
     dw1000_ll_interrupt_on_received(true);
     dw1000_ll_interrupt_on_receive_failed(true);

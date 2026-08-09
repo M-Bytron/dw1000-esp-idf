@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "esp_log.h"
+#include "esp_mac.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -81,6 +82,16 @@ static void dw1000_radio_task(void *arg)
     printf("========= DEVICE A (radio) =======\n");
     printf("==================================\n");
 
+    /* Print this ESP32's unique factory BLE MAC (per-chip). */
+    {
+        uint8_t mac[6];
+        if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+            ESP_LOGW("DW1000", "ESP32 BLE MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+                     (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2],
+                     (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
+        }
+    }
+
     /* Init the SPI bus / driver and select the chip. */
     dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST);
 
@@ -91,10 +102,14 @@ static void dw1000_radio_task(void *arg)
         }
     }
 
-    /* Configure the radio (both boards must use the same channel/mode). */
+    /* Configure the radio (both boards must use the same channel/mode).
+       Our own address is derived from this ESP32's BLE MAC in dw1000_config(). */
     dw1000_config(0xDECA, 0x1001, DW1000_MODE_SHORTDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, 16400);
-    dw1000_set_peer_address(0x1002);   /* only range with the paired anchor */
+
+    /* Pair with the anchor: B's ESP32 BLE MAC (6 bytes, MSB first). */
+    static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE3, 0xA4, 0x6E};
+    dw1000_set_peer_eui(peer_eui);   /* hardware filter: only range with this peer */
 
     /* Run this board's role. */
     if (THIS_ROLE == ROLE_TAG) {

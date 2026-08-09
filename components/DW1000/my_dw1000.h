@@ -252,7 +252,9 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v);
 #define DW1000_MSG_RANGE        2   /* tag -> anchor: carries T1 / T4 / T5     */
 #define DW1000_MSG_RANGE_REPORT 3   /* anchor -> tag: computed distance (float) */
 
-#define DW1000_LEN_DATA         18     /* length of every ranging frame         */
+#define DW1000_LEN_DATA         16     /* payload length of a ranging frame;
+                                           the full frame adds a 21-byte IEEE
+                                           802.15.4 extended-address header    */
 #define DW1000_REPLY_DELAY_US   3000u  /* nominal reply delay (measured anyway) */
 #define DW1000_RANGE_TIMEOUT_MS 1000   /* tag: max wait for a result, ms        */
 
@@ -264,12 +266,18 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v);
 typedef bool (*dw1000_distance_cb_t)(float distance_m, bool got_reading);
 
 /*
- * Pair this device with a specific peer so it only responds to / accepts
- * frames from that peer. peer_address is the OTHER device's short address
- * (this device's own address is set via dw1000_config's device_address).
- * Pass 0xFFFF to disable pairing (accept anyone) - the default.
+ * Pair this device with a specific peer using its 6-byte ESP32 BLE MAC
+ * (peer_mac[0] is the most-significant byte), e.g. {0xD4, 0x8C, 0x49, 0xE3,
+ * 0xA4, 0x6E}. The 6-byte MAC is padded to the 8-byte IEEE 802.15.4 extended
+ * address used in the frame header and for the hardware frame filter.
+ *
+ * This device's own address is derived from ITS OWN ESP32 BLE MAC in
+ * dw1000_config(). Calling this enables the DW1000 receive frame filter so
+ * only frames destined to this device are accepted, and every ranging frame
+ * is addressed to the peer - so the device only talks to its paired peer
+ * (Option C: full IEEE 802.15.4 extended-address frames).
  */
-void dw1000_set_peer_address(uint16_t peer_address);
+void dw1000_set_peer_eui(const uint8_t peer_mac[6]);
 
 /*
  * Run ONE ranging exchange as the tag (initiator): sends a POLL and blocks up

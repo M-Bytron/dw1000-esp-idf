@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -22,10 +23,13 @@ static const char *TAG = "DW1000";
 /* ~15.65 ps per raw timestamp tick -> meters per tick */
 #define DW1000_METERS_PER_TICK 0.0046917639786159f
 
-/* Pairing: our own short address (set by dw1000_config) and the paired peer
-   (set by dw1000_set_peer_address). peer == 0xFFFF disables pairing. */
-static uint16_t s_own_address  = 0xFFFF;
-static uint16_t s_peer_address = 0xFFFF;
+/* Pairing (Option C): PAN used in headers, our EUI and the paired peer's EUI
+   (both kept in register order = LSB first). s_peer_set enables the hardware
+   receive frame filter. */
+static uint16_t s_pan_id       = 0xFFFF;
+static uint8_t  s_own_eui[8];
+static uint8_t  s_peer_eui[8]  = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static bool     s_peer_set     = false;
 
 /* ============================ mode presets ============================ */
 
@@ -254,7 +258,24 @@ void dw1000_config(uint16_t network_id,
                    uint8_t channel,
                    uint16_t antenna_delay)
 {
-    s_own_address = device_address;   /* remember our short address (pairing) */
+    s_pan_id = network_id;              /* PAN used in the frame headers */
+    /* Derive our 8-byte extended address from this ESP32's unique 6-byte BLE
+       MAC (two leading zero bytes) and load it into the DW1000 EUI register so
+       the hardware frame filter (FFAE) matches our own address. */
+    {
+        uint8_t mac[6];
+        int i;
+        if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+            for (i = 0; i < 6; i++) {
+                s_own_eui[i] = mac[5 - i];   /* register order: LSB first */
+            }
+            s_own_eui[6] = 0x00;
+            s_own_eui[7] = 0x00;
+            dw1000_ll_write(DW1000_EUI, DW1000_NO_SUB, s_own_eui, 8);
+        } else {
+            dw1000_ll_get_eui_bytes(s_own_eui);   /* fallback */
+        }
+    }
     dw1000_begin_config();
     dw1000_set_defaults();   /* standard defaults (also enables the IRQ events) */
 
@@ -266,7 +287,10 @@ void dw1000_config(uint16_t network_id,
 
     dw1000_commit_config();
 
-    ESP_LOGI(TAG, "Radio configured:");
+    ESP_LOGI(TAG, "Radio configured - EUI %02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+             (unsigned)s_own_eui[7], (unsigned)s_own_eui[6], (unsigned)s_own_eui[5],
+             (unsigned)s_own_eui[4], (unsigned)s_own_eui[3], (unsigned)s_own_eui[2],
+             (unsigned)s_own_eui[1], (unsigned)s_own_eui[0]);
     dw1000_print_device_info();
 }
 
@@ -469,46 +493,58 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v)
 /* Implementation of the ready-to-use ranging engine declared in the header.
    The tag drives the exchange; the anchor replies and computes the distance. */
 
-/* Payload layout of a ranging frame (DW1000_LEN_DATA bytes):
-     [0]     message type
-     [1-2]   source short address (little-endian) - used for pairing
-     [3-7]   T1  (RANGE only)
-     [8-12]  T4 / T2 (RANGE only)
-     [13-17] T5 / distance (RANGE / RANGE_REPORT)
-   Offsets overlap per message type; each message only uses what it needs. */
-#define DW1000_OFF_SRC 1
-#define DW1000_OFF_T1  3
-#define DW1000_OFF_T4  8
-#define DW1000_OFF_T5  13
+/* Full IEEE 802.15.4 extended-address frame (header + DW1000_LEN_DATA payload):
+     [0-1]   frame control (data, PAN compression, dest+src extended)
+     [2]     sequence number
+     [3-10]  destination EUI (LSB first)
+     [11-12] source PAN id (PAN compression = single PAN, after dest addr)
+     [13-20] source EUI (LSB first)
+     [21..]  payload: [0]=type, [1-5]=T1, [6-10]=T4, [11-15]=T5
+             (RANGE_REPORT reuses [1-4] for the float distance) */
+#define DW1000_HDR_LEN     21
+#define DW1000_OFF_DST_EUI 3
+#define DW1000_OFF_SRC_EUI 13
+#define DW1000_OFF_TYPE    (DW1000_HDR_LEN + 0)
+#define DW1000_OFF_T1      (DW1000_HDR_LEN + 1)
+#define DW1000_OFF_T4      (DW1000_HDR_LEN + 6)
+#define DW1000_OFF_T5      (DW1000_HDR_LEN + 11)
 
 /* ranging state (file scope) */
-static uint8_t  s_data[DW1000_LEN_DATA];
+static uint8_t  s_data[DW1000_HDR_LEN + DW1000_LEN_DATA];
 static uint8_t  s_last_sent_type;      /* tag: which frame was just transmitted */
 static uint64_t s_t1;                  /* tag: poll TX timestamp */
 static uint64_t s_t2, s_t3;            /* anchor: poll RX, poll_ack TX timestamp */
 static volatile bool s_result_ready;   /* true when a RANGE_REPORT arrived */
 static float  s_last_distance;         /* last measured distance (m) */
 static bool   s_tag_init_done;         /* run_tag radio setup done once */
+static uint8_t s_seq;                  /* IEEE header sequence counter */
 
-/* write / read a 16-bit short address as 2 little-endian bytes */
-static void put_addr(uint8_t *buf, uint16_t addr)
+/* write the IEEE 802.15.4 header (extended addressing) in front of the payload */
+static void build_header(uint8_t *buf, uint16_t pan,
+                         const uint8_t dst_eui[8], const uint8_t src_eui[8])
 {
-    buf[0] = (uint8_t)(addr & 0xFF);
-    buf[1] = (uint8_t)((addr >> 8) & 0xFF);
-}
-
-static uint16_t get_addr(const uint8_t *buf)
-{
-    return (uint16_t)(buf[0] | ((uint16_t)buf[1] << 8));
+    buf[0] = 0x41;               /* frame type = data, PAN ID compression on */
+    buf[1] = 0xCC;               /* IEEE 2011: dest addressing = ext, src = ext */
+    buf[2] = s_seq++;
+    memcpy(buf + 3,  dst_eui, 8);        /* destination EUI (LSB first) */
+    buf[11] = (uint8_t)(pan & 0xFF);     /* source PAN (compression = one PAN) */
+    buf[12] = (uint8_t)(pan >> 8);
+    memcpy(buf + 13, src_eui, 8);        /* source EUI (LSB first) */
 }
 
 /* true if the received frame came from the paired peer (or pairing is off) */
 static bool is_peer(const uint8_t *frame)
 {
-    if (s_peer_address == 0xFFFF) {
+    if (!s_peer_set) {
         return true;
     }
-    return get_addr(frame + DW1000_OFF_SRC) == s_peer_address;
+    return memcmp(frame + DW1000_OFF_SRC_EUI, s_peer_eui, 8) == 0;
+}
+
+/* true if the frame is addressed to us (destination EUI == our own EUI) */
+static bool is_addressed_to_me(const uint8_t *frame)
+{
+    return memcmp(frame + DW1000_OFF_DST_EUI, s_own_eui, 8) == 0;
 }
 
 /* write a 40-bit timestamp into 5 little-endian bytes */
@@ -555,11 +591,33 @@ static void tag_on_sent(void)
 static void tag_on_received(void)
 {
     uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
-    if (len < 1 || !is_peer(s_data)) {
-        return;   /* not our paired anchor (or empty): ignore */
+    if (len < DW1000_HDR_LEN + 1) {
+        ESP_LOGW(TAG, "TAG RX: short frame len=%u", (unsigned)len);
+        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        return;
     }
+    if (!is_peer(s_data)) {
+        uint8_t *e = s_data + DW1000_OFF_SRC_EUI;
+        ESP_LOGW(TAG, "TAG RX: dropped (not peer) type=%u src=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)s_data[DW1000_OFF_TYPE],
+                 (unsigned)e[7], (unsigned)e[6], (unsigned)e[5], (unsigned)e[4],
+                 (unsigned)e[3], (unsigned)e[2], (unsigned)e[1], (unsigned)e[0]);
+        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        return;
+    }
+    if (!is_addressed_to_me(s_data)) {
+        uint8_t *d = s_data + DW1000_OFF_DST_EUI;
+        ESP_LOGW(TAG, "TAG RX: dropped (not for me) type=%u dst=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)s_data[DW1000_OFF_TYPE],
+                 (unsigned)d[7], (unsigned)d[6], (unsigned)d[5], (unsigned)d[4],
+                 (unsigned)d[3], (unsigned)d[2], (unsigned)d[1], (unsigned)d[0]);
+        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        return;
+    }
+    // ESP_LOGI(TAG, "TAG RX: peer frame type=%u len=%u",
+    //          (unsigned)s_data[DW1000_OFF_TYPE], (unsigned)len);
 
-    if (s_data[0] == DW1000_MSG_POLL_ACK) {
+    if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL_ACK) {
         /* anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) */
         uint64_t t4 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
@@ -567,14 +625,15 @@ static void tag_on_received(void)
         /* + antenna delay: TX times must be antenna-referenced (like setDelay/TX_TIME) */
         uint64_t t5 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
 
-        s_data[0] = DW1000_MSG_RANGE;
-        put_addr(s_data + DW1000_OFF_SRC, s_own_address);
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_RANGE;
         put_ts(s_data + DW1000_OFF_T1, s_t1);
         put_ts(s_data + DW1000_OFF_T4, t4);
         put_ts(s_data + DW1000_OFF_T5, t5);
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         s_last_sent_type = DW1000_MSG_RANGE;
-        dw1000_send_at_ticks(s_data, DW1000_LEN_DATA, target);
-    } else if (s_data[0] == DW1000_MSG_RANGE_REPORT) {
+        dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE_REPORT) {
         memcpy(&s_last_distance, s_data + DW1000_OFF_T1, sizeof(s_last_distance));
         s_result_ready = true;
         dw1000_start_receive();   /* re-arm for the next exchange */
@@ -596,10 +655,10 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
     /* start one exchange */
     s_result_ready = false;
     memset(s_data, 0, sizeof(s_data));
-    s_data[0] = DW1000_MSG_POLL;
-    put_addr(s_data + DW1000_OFF_SRC, s_own_address);
+    s_data[DW1000_OFF_TYPE] = DW1000_MSG_POLL;
+    build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
     s_last_sent_type = DW1000_MSG_POLL;
-    dw1000_send(s_data, DW1000_LEN_DATA);
+    dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
 
     /* wait for the result or the timeout */
     TickType_t t0 = xTaskGetTickCount();
@@ -620,11 +679,33 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
 static void anchor_on_received(void)
 {
     uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
-    if (len < 1 || !is_peer(s_data)) {
-        return;   /* not our paired tag (or empty): ignore */
+    if (len < DW1000_HDR_LEN + 1) {
+        ESP_LOGW(TAG, "ANCHOR RX: short frame len=%u", (unsigned)len);
+        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        return;
     }
+    if (!is_peer(s_data)) {
+        uint8_t *e = s_data + DW1000_OFF_SRC_EUI;
+        ESP_LOGW(TAG, "ANCHOR RX: dropped (not peer) type=%u src=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)s_data[DW1000_OFF_TYPE],
+                 (unsigned)e[7], (unsigned)e[6], (unsigned)e[5], (unsigned)e[4],
+                 (unsigned)e[3], (unsigned)e[2], (unsigned)e[1], (unsigned)e[0]);
+        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        return;
+    }
+    if (!is_addressed_to_me(s_data)) {
+        uint8_t *d = s_data + DW1000_OFF_DST_EUI;
+        ESP_LOGW(TAG, "ANCHOR RX: dropped (not for me) type=%u dst=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)s_data[DW1000_OFF_TYPE],
+                 (unsigned)d[7], (unsigned)d[6], (unsigned)d[5], (unsigned)d[4],
+                 (unsigned)d[3], (unsigned)d[2], (unsigned)d[1], (unsigned)d[0]);
+        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        return;
+    }
+    // ESP_LOGI(TAG, "ANCHOR RX: peer frame type=%u len=%u",
+    //          (unsigned)s_data[DW1000_OFF_TYPE], (unsigned)len);
 
-    if (s_data[0] == DW1000_MSG_POLL) {
+    if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL) {
         /* reply after REPLY_DELAY_US; the actual reply time is measured */
         s_t2 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
@@ -632,10 +713,11 @@ static void anchor_on_received(void)
         /* + antenna delay: the TX timestamp must be antenna-referenced (like TX_TIME) */
         s_t3 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
 
-        s_data[0] = DW1000_MSG_POLL_ACK;
-        put_addr(s_data + DW1000_OFF_SRC, s_own_address);
-        dw1000_send_at_ticks(s_data, DW1000_LEN_DATA, target);
-    } else if (s_data[0] == DW1000_MSG_RANGE) {
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_POLL_ACK;
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE) {
         /* we have T2/T3; RANGE carries T1/T4/T5; measure T6 now */
         uint64_t t1 = get_ts(s_data + DW1000_OFF_T1);
         uint64_t t4 = get_ts(s_data + DW1000_OFF_T4);
@@ -655,10 +737,11 @@ static void anchor_on_received(void)
         ESP_LOGI(TAG, "RANGE OK: %.2f m", (double)range);
 
         /* send the computed range back to the tag */
-        s_data[0] = DW1000_MSG_RANGE_REPORT;
-        put_addr(s_data + DW1000_OFF_SRC, s_own_address);
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_RANGE_REPORT;
         memcpy(s_data + DW1000_OFF_T1, &range, sizeof(range));
-        dw1000_send(s_data, DW1000_LEN_DATA);
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     }
 }
 
@@ -674,7 +757,23 @@ void dw1000_run_anchor(int irq_gpio)
     }
 }
 
-void dw1000_set_peer_address(uint16_t peer_address)
+void dw1000_set_peer_eui(const uint8_t peer_mac[6])
 {
-    s_peer_address = peer_address;
+    int i;
+    /* caller passes the peer's 6-byte ESP32 BLE MAC (peer_mac[0] = MSB). Pad
+       to the 8-byte extended address with two leading zero bytes and store
+       LSB-first (register / header order). */
+    for (i = 0; i < 6; i++) {
+        s_peer_eui[i] = peer_mac[5 - i];
+    }
+    s_peer_eui[6] = 0x00;
+    s_peer_eui[7] = 0x00;
+    s_peer_set = true;
+    /* Pairing is done in software (is_peer()): keep the hardware frame filter
+       OFF so any valid PHY frame is received and we decide here by source EUI.
+       This avoids depending on the DW1000's address-match hardware. */
+    dw1000_ll_apply_frame_filter(0, 0);
+    ESP_LOGI(TAG, "Paired with peer BLE MAC %02X:%02X:%02X:%02X:%02X:%02X",
+             (unsigned)peer_mac[0], (unsigned)peer_mac[1], (unsigned)peer_mac[2],
+             (unsigned)peer_mac[3], (unsigned)peer_mac[4], (unsigned)peer_mac[5]);
 }

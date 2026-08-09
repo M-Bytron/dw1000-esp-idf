@@ -9,5 +9,5 @@
 idf_component_register(
     SRCS "my_dw1000.c" "dw1000_lowlevel.c"
     INCLUDE_DIRS "."
-    PRIV_REQUIRES driver
+    PRIV_REQUIRES driver esp_hw_support
 )

@@ -53,6 +53,10 @@ void dw1000_ll_set_network_id(uint16_t val);
 void dw1000_ll_set_device_address(uint16_t val);
 void dw1000_ll_set_eui(const char *eui);   /* "AA:BB:CC:DD:EE:FF:00:11" */
 
+/* Read the 8-byte EUI as raw register bytes (least-significant byte first,
+   i.e. the order used on the air / in the IEEE 802.15.4 header). */
+void dw1000_ll_get_eui_bytes(uint8_t eui[8]);
+
 /* ============================ RF configuration ============================
  * The setters below only update the driver's cached configuration. Call
  * dw1000_ll_new_configuration() first (loads the current chip state), then
@@ -67,6 +71,12 @@ void dw1000_ll_set_channel(uint8_t channel);
 void dw1000_ll_enable_mode(const uint8_t mode[3]);
 void dw1000_ll_set_defaults(void);
 void dw1000_ll_use_smart_power(int enabled);
+
+/* Enable/disable the hardware receive frame filter (writes SYS_CFG now).
+   allow_extended = accept frames destined to MY extended (EUI) address.
+   allow_broadcast = accept broadcast/multicast frames.
+   (both 0 = filter disabled). */
+void dw1000_ll_apply_frame_filter(int allow_extended, int allow_broadcast);
 
 void dw1000_ll_set_antenna_delay(uint16_t delay);
 uint16_t dw1000_ll_get_antenna_delay(void);
