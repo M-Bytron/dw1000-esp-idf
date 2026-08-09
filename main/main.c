@@ -44,18 +44,25 @@ const uint8_t PIN_IRQ  = 13;
 const uint8_t PIN_RST  = 32;
 
 /* ===== Test role =====
-   Set THIS_ROLE to ROLE_SENDER on one board and ROLE_RECEIVER on the other.
-   Both boards must use the same channel/mode (they run the same config test). */
-#define ROLE_SENDER   1
-#define ROLE_RECEIVER 0
-#define THIS_ROLE     ROLE_SENDER   /* <-- change to ROLE_RECEIVER on the 2nd board */
+   TAG  (initiator): drives the two-way ranging exchange and prints the distance.
+   ANCHOR (responder): replies, computes the distance (DS-TWR), sends it back.
+   Both boards must use the same channel/mode (same config test). */
+#define ROLE_TAG    1
+#define ROLE_ANCHOR 0
+#define THIS_ROLE   ROLE_TAG   /* A: TAG, B: ANCHOR */
 
-/* A tiny command frame sent between the two boards. */
-typedef struct {
-    uint8_t cmd;    /* command id */
-    uint8_t seq;    /* sequence number */
-    uint8_t data;   /* one data byte */
-} uwb_cmd_t;
+/* Asymmetric double-sided two-way ranging (mirrors arduino-dw1000).
+   All four reply/round times are MEASURED and exchanged, so neither the
+   reply delay nor the clock offset has to be assumed. */
+#define MSG_POLL         0
+#define MSG_POLL_ACK     1
+#define MSG_RANGE        2
+#define MSG_RANGE_REPORT 3
+#define LEN_DATA         16
+#define REPLY_DELAY_US   3000u   /* nominal delay; measured, not assumed */
+
+/* m per raw timestamp tick (c * ~15.65 ps) */
+#define DW1000_M_PER_TICK 0.0046917639786159f
 
 /* Configure the radio with the new pure-C config API and print the result.
    The order matters: set the mode (which sets the pulse frequency) BEFORE
@@ -85,55 +92,152 @@ static void dw1000_config_test(void)
     printf("--- Config test done ---\n");
 }
 
-/* Sender: broadcast a short command frame every second. */
-static void run_sender(void)
+/* ---- shared frame buffer + tag/anchor state ---- */
+
+static uint8_t s_data[LEN_DATA];
+static uint8_t s_last_sent_type;   /* tag: which frame was just transmitted */
+
+static uint64_t s_t1;              /* tag: poll TX timestamp */
+static uint64_t s_t2, s_t3;        /* anchor: poll RX, poll_ack TX timestamp */
+
+static void put_ts(uint8_t *buf, uint64_t ts)
 {
-    uwb_cmd_t cmd;
-    uint8_t seq = 0;
-
-    printf("--- ROLE: SENDER ---\n");
-    while (1) {
-        cmd.cmd  = 0x01;                       /* CMD_POLL */
-        cmd.seq  = seq++;
-        cmd.data = (uint8_t)(seq * 3);
-
-        dw1000_send((const uint8_t *)&cmd, sizeof(cmd));
-
-        /* wait until the frame has actually left the chip (10 ms polls so the
-           sender never tight-loops and trips the task watchdog) */
-        for (int i = 0; i < 200 && !dw1000_is_tx_done(); i++) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        printf("TX: cmd=%u seq=%u data=%u | tx_ts=%llu\n",
-               (unsigned)cmd.cmd, (unsigned)cmd.seq, (unsigned)cmd.data,
-               (unsigned long long)dw1000_get_tx_timestamp());
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    int i;
+    for (i = 0; i < 5; i++) {
+        buf[i] = (uint8_t)((ts >> (i * 8)) & 0xFF);
     }
 }
 
-/* Called from the DW1000 IRQ dispatch task when a frame is received. */
-static void on_frame_received(void)
+static uint64_t get_ts(const uint8_t *buf)
 {
-    uwb_cmd_t cmd;
-    uint16_t len = dw1000_get_data((uint8_t *)&cmd, sizeof(cmd));
-    printf("RX (%u): cmd=%u seq=%u data=%u | rx_ts=%llu pwr=%.1f dBm fp=%.1f dBm\n",
-           (unsigned)len,
-           (unsigned)cmd.cmd, (unsigned)cmd.seq, (unsigned)cmd.data,
-           (unsigned long long)dw1000_get_rx_timestamp(),
-           (double)dw1000_get_rx_power_dbm(),
-           (double)dw1000_get_first_path_power_dbm());
+    uint64_t ts = 0;
+    int i;
+    for (i = 0; i < 5; i++) {
+        ts |= (uint64_t)buf[i] << (i * 8);
+    }
+    return ts;
 }
 
-/* Receiver: interrupt-driven - no polling loop, so no watchdog pressure. */
-static void run_receiver(void)
+/* Time difference with 40-bit rollover handling (mirrors DW1000Time::wrap).
+   The system counter wraps every 2^40 ticks (~17 s); if a difference goes
+   negative because later/earlier straddle the rollover, add 2^40 back. */
+static int64_t diff_ts(uint64_t later, uint64_t earlier)
 {
-    printf("--- ROLE: RECEIVER (interrupt-driven) ---\n");
+    int64_t d = (int64_t)(later - earlier);
+    if (d < 0) {
+        d += (int64_t)0x10000000000LL;   /* 2^40 */
+    }
+    return d;
+}
+
+/* ---- TAG (initiator) ---- */
+
+static void tag_on_sent(void)
+{
+    if (s_last_sent_type == MSG_POLL) {
+        s_t1 = dw1000_get_tx_timestamp();
+    }
+}
+
+static void tag_on_received(void)
+{
+    uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
+    if (len < 1) {
+        return;
+    }
+
+    if (s_data[0] == MSG_POLL_ACK) {
+        /* anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) */
+        uint64_t t4 = dw1000_get_rx_timestamp();
+        uint64_t now = dw1000_get_system_timestamp();
+        uint64_t target = now + (uint64_t)((float)REPLY_DELAY_US * 63897.6f);
+        /* + antenna delay: TX times must be antenna-referenced (like setDelay/TX_TIME) */
+        uint64_t t5 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
+
+        s_data[0] = MSG_RANGE;
+        put_ts(s_data + 1,  s_t1);
+        put_ts(s_data + 6,  t4);
+        put_ts(s_data + 11, t5);
+        s_last_sent_type = MSG_RANGE;
+        dw1000_send_at_ticks(s_data, LEN_DATA, target);
+    } else if (s_data[0] == MSG_RANGE_REPORT) {
+        float range = 0.0f;
+        memcpy(&range, s_data + 1, sizeof(range));
+        printf("DISTANCE: %.2f m\n", (double)range);
+        dw1000_start_receive();   /* re-arm for the next exchange */
+    }
+}
+
+static void run_tag(void)
+{
+    printf("--- ROLE: TAG (DS-TWR initiator) ---\n");
     dw1000_irq_start(PIN_IRQ);
     dw1000_receive_permanently(true);
-    dw1000_on_received(on_frame_received);
+    dw1000_on_sent(tag_on_sent);
+    dw1000_on_received(tag_on_received);
+
+    while (1) {
+        memset(s_data, 0, sizeof(s_data));
+        s_data[0] = MSG_POLL;
+        s_last_sent_type = MSG_POLL;
+        dw1000_send(s_data, LEN_DATA);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+/* ---- ANCHOR (responder): replies, computes DS-TWR, sends the range ---- */
+
+static void anchor_on_received(void)
+{
+    uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
+    if (len < 1) {
+        return;
+    }
+
+    if (s_data[0] == MSG_POLL) {
+        /* reply after REPLY_DELAY_US; the actual reply time is measured */
+        s_t2 = dw1000_get_rx_timestamp();
+        uint64_t now = dw1000_get_system_timestamp();
+        uint64_t target = now + (uint64_t)((float)REPLY_DELAY_US * 63897.6f);
+        /* + antenna delay: the TX timestamp must be antenna-referenced (like TX_TIME) */
+        s_t3 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
+
+        s_data[0] = MSG_POLL_ACK;
+        dw1000_send_at_ticks(s_data, LEN_DATA, target);
+    } else if (s_data[0] == MSG_RANGE) {
+        /* we have T2/T3; RANGE carries T1/T4/T5; measure T6 now */
+        uint64_t t1 = get_ts(s_data + 1);
+        uint64_t t4 = get_ts(s_data + 6);
+        uint64_t t5 = get_ts(s_data + 11);
+        uint64_t t6 = dw1000_get_rx_timestamp();
+
+        /* asymmetric DS-TWR (arduino-dw1000 computeRangeAsymmetric) */
+        int64_t round1 = diff_ts(t4, t1);      /* tag:   poll -> ack rx */
+        int64_t reply1 = diff_ts(s_t3, s_t2);  /* anchor: poll rx -> ack tx */
+        int64_t round2 = diff_ts(t6, s_t3);    /* anchor: ack tx -> range rx */
+        int64_t reply2 = diff_ts(t5, t4);      /* tag:   ack rx -> range tx */
+        int64_t num = round1 * round2 - reply1 * reply2;
+        int64_t den = round1 + round2 + reply1 + reply2;
+        int64_t tof = (den != 0) ? (num / den) : 0;
+        float range = (float)tof * DW1000_M_PER_TICK;
+
+        printf("RANGE OK: %.2f m\n", (double)range);
+
+        /* send the computed range back to the tag */
+        s_data[0] = MSG_RANGE_REPORT;
+        memcpy(s_data + 1, &range, sizeof(range));
+        dw1000_send(s_data, LEN_DATA);
+    }
+}
+
+static void run_anchor(void)
+{
+    printf("--- ROLE: ANCHOR (DS-TWR responder) ---\n");
+    dw1000_irq_start(PIN_IRQ);
+    dw1000_receive_permanently(true);
+    dw1000_on_received(anchor_on_received);
     dw1000_start_receive();
 
-    /* everything happens in on_frame_received(); the driver re-arms RX */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -159,10 +263,10 @@ static void dw1000_radio_task(void *arg)
     dw1000_config_test();
 
     /* Run this board's role. */
-    if (THIS_ROLE == ROLE_SENDER) {
-        run_sender();
+    if (THIS_ROLE == ROLE_TAG) {
+        run_tag();
     } else {
-        run_receiver();
+        run_anchor();
     }
 }
 

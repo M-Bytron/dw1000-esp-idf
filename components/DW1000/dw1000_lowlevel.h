@@ -132,6 +132,11 @@ float dw1000_ll_get_receive_quality(void);    /* dB */
    dw1000_ll_new_transmit() and dw1000_ll_start_transmit(). */
 void dw1000_ll_set_delay(uint64_t delay_us);
 
+/* Start a transmit at an absolute DW1000 timestamp (raw 40-bit ticks).
+   Call between dw1000_ll_new_transmit() and this function - used for
+   precise two-way-ranging replies. */
+void dw1000_ll_start_transmit_at(uint64_t target_ticks);
+
 /* ============================ interrupts / callbacks ============================
  * The DW1000 IRQ pin goes high when an enabled event occurs. Start the IRQ
  * service with dw1000_ll_irq_start(), attach a handler with dw1000_ll_attach_*,

@@ -128,6 +128,11 @@ void dw1000_send(const uint8_t *data, uint16_t len);
 /* Transmit a frame after a relative delay (us) - useful for ranging. */
 void dw1000_send_at(const uint8_t *data, uint16_t len, uint32_t delay_us);
 
+/* Transmit a frame at an absolute DW1000 timestamp (raw 40-bit ticks).
+   Used for precise two-way-ranging replies: the peer replies at exactly
+   rx_timestamp + reply_delay_ticks. */
+void dw1000_send_at_ticks(const uint8_t *data, uint16_t len, uint64_t target_ticks);
+
 /* ============================ data buffer ============================ */
 
 /*

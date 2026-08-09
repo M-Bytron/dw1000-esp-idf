@@ -274,6 +274,13 @@ void dw1000_send_at(const uint8_t *data, uint16_t len, uint32_t delay_us)
     dw1000_ll_start_transmit();
 }
 
+void dw1000_send_at_ticks(const uint8_t *data, uint16_t len, uint64_t target_ticks)
+{
+    dw1000_ll_set_data(data, len);
+    dw1000_ll_new_transmit();
+    dw1000_ll_start_transmit_at(target_ticks);
+}
+
 /* ============================ data buffer ============================ */
 
 uint16_t dw1000_get_data(uint8_t *buf, uint16_t max_len)

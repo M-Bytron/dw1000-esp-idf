@@ -1248,6 +1248,35 @@ void dw1000_ll_set_delay(uint64_t delay_us)
     g_tx_delayed = true;
 }
 
+void dw1000_ll_start_transmit_at(uint64_t target_ticks)
+{
+    uint8_t sysctrl[DW1000_LEN_SYS_CTRL] = {0};
+    uint8_t dx[DW1000_LEN_STAMP] = {0};
+    int i;
+
+    dw1000_ll_write_transmit_frame_control();
+
+    /* write the absolute target time to the delay register */
+    for (i = 0; i < DW1000_LEN_STAMP; i++) {
+        dx[i] = (uint8_t)((target_ticks >> (i * 8)) & 0xFF);
+    }
+    dx[0] = 0;
+    dx[1] &= 0xFE;
+    dw1000_ll_write(DW1000_DX_TIME, DW1000_NO_SUB, dx, DW1000_LEN_STAMP);
+
+    dw1000_ll_set_bit(sysctrl, sizeof(sysctrl), DW1000_SFCST_BIT, !g_frame_check);
+    dw1000_ll_set_bit(sysctrl, sizeof(sysctrl), DW1000_TXDLYS_BIT, true);
+    dw1000_ll_set_bit(sysctrl, sizeof(sysctrl), DW1000_TXSTRT_BIT, true);
+    dw1000_ll_write(DW1000_SYS_CTRL, DW1000_NO_SUB, sysctrl, sizeof(sysctrl));
+
+    if (g_permanent_receive) {
+        g_device_mode = DW1000_MODE_RX;
+        dw1000_ll_start_receive();
+    } else {
+        g_device_mode = DW1000_MODE_IDLE;
+    }
+}
+
 /* ==========================================================================
  * Event callbacks, interrupt service and diagnostics (pure-C port).
  * ======================================================================== */
@@ -1308,7 +1337,7 @@ void dw1000_ll_handle_interrupt(void)
         dw1000_ll_clear_receive_timestamp_available_status();
     }
 
-    /* RX failed / timeout / done (re-arm automatically in permanent RX) */
+    /* RX failed / timeout: re-arm automatically in permanent RX. */
     if (dw1000_ll_status_bit(DW1000_LDEERR_BIT) ||
         dw1000_ll_status_bit(DW1000_RXFCE_BIT) ||
         dw1000_ll_status_bit(DW1000_RXPHE_BIT) ||
@@ -1334,14 +1363,14 @@ void dw1000_ll_handle_interrupt(void)
         }
     } else if (dw1000_ll_status_bit(DW1000_RXFCG_BIT) ||
                dw1000_ll_status_bit(DW1000_RXDFR_BIT)) {
+        /* A good frame: call the handler. We do NOT auto re-arm here, because
+           the handler may have started a (delayed) TX - calling idle() now
+           would abort it. The handler re-arms RX (or the TX's permanent
+           re-arm does). */
         if (g_on_received) {
             g_on_received();
         }
         dw1000_ll_clear_receive_status();
-        if (g_permanent_receive) {
-            dw1000_ll_new_receive();
-            dw1000_ll_start_receive();
-        }
     }
 
     /* clear whatever is left unhandled */
