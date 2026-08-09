@@ -111,6 +111,22 @@ void dw1000_commit_config(void);
 /* Convenience: begin_config() + commit_config(). */
 void dw1000_apply_config(void);
 
+/*
+ * One-call radio configuration: loads the chip defaults, applies the given
+ * settings and re-tunes the radio, then prints the resulting identity/mode
+ * via ESP_LOGI so you can verify the write. Both boards must use the SAME
+ * channel/mode for ranging.
+ *
+ *   mode          - one of the DW1000_MODE_* presets
+ *                   ({ data_rate, pulse_frequency, preamble_length })
+ *   antenna_delay - calibrated antenna delay in raw ticks (same on both boards)
+ */
+void dw1000_config(uint16_t network_id,
+                   uint16_t device_address,
+                   const uint8_t mode[3],
+                   uint8_t channel,
+                   uint16_t antenna_delay);
+
 /* ============================ transceiver control ============================ */
 
 /* Put the radio in idle state (no RX / TX active). */
@@ -191,6 +207,75 @@ esp_err_t dw1000_irq_start(uint8_t irq_gpio);
 
 /* Read on-chip temperature (Celsius) and battery voltage (Volts). */
 void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v);
+
+/* ============================ DS-TWR ranging ============================ */
+
+/*
+ * Asymmetric double-sided two-way ranging (DS-TWR) - a ready-to-use ranging
+ * engine built on the transceiver primitives above (mirrors the classic
+ * arduino-dw1000 ranging example).
+ *
+ * One exchange looks like this (~6 ms):
+ *
+ *     TAG (initiator)                    ANCHOR (responder)
+ *      |  POLL (T1)  --------------------->|   T2 = poll RX time
+ *      |  POLL_ACK (T3) <------------------|   reply after DW1000_REPLY_DELAY_US
+ *      |  RANGE (T1, T4, T5) ------------->|   T6 = range RX time
+ *      |                                   |   anchor computes the DS-TWR distance
+ *      |  RANGE_REPORT (float meters) <----|   anchor prints it (ESP_LOGI)
+ *      |  on_distance(distance) called     |
+ *
+ * All four round/reply times are MEASURED from the chip's 40-bit timestamps
+ * and exchanged, so neither the reply delay nor the two boards' crystal
+ * offset has to be assumed. Set an accurate antenna delay
+ * (dw1000_set_antenna_delay) on BOTH boards for a correct absolute distance.
+ * Both boards must use the SAME channel/mode configuration.
+ *
+ * Typical tag usage:
+ *
+ *   static bool on_distance(float meters) {
+ *       if (meters < 0.0f) { printf("range timeout\n"); return false; }
+ *       printf("distance: %.2f m\n", (double)meters);
+ *       return true;
+ *   }
+ *   ...
+ *   dw1000_init(sck, miso, mosi, cs, irq, rst);
+ *   ... configure the radio (dw1000_commit_config) ...
+ *   for (;;) { dw1000_run_tag(irq, DW1000_RANGE_TIMEOUT_MS, on_distance); }
+ *
+ * The anchor side simply calls dw1000_run_anchor(irq) once (never returns).
+ */
+
+/* Message identifiers (first byte of every ranging frame). */
+#define DW1000_MSG_POLL         0   /* tag -> anchor: start the exchange       */
+#define DW1000_MSG_POLL_ACK     1   /* anchor -> tag: reply to the poll        */
+#define DW1000_MSG_RANGE        2   /* tag -> anchor: carries T1 / T4 / T5     */
+#define DW1000_MSG_RANGE_REPORT 3   /* anchor -> tag: computed distance (float) */
+
+#define DW1000_LEN_DATA         16     /* length of every ranging frame         */
+#define DW1000_REPLY_DELAY_US   3000u  /* nominal reply delay (measured anyway) */
+#define DW1000_RANGE_TIMEOUT_MS 1000   /* tag: max wait for a result, ms        */
+
+/* Callback for the tag's ranging result. Called with the measured distance in
+   meters, or with a NEGATIVE value if no distance arrived within the timeout.
+   Return true to accept the reading, false to reject it. */
+typedef bool (*dw1000_distance_cb_t)(float distance_m);
+
+/*
+ * Run ONE ranging exchange as the tag (initiator): sends a POLL and blocks up
+ * to timeout_ms waiting for the RANGE_REPORT, then calls on_distance() with the
+ * result and returns the callback's return value. Single-shot - the caller
+ * decides how often to call it. The radio runs interrupt-driven; only the
+ * calling task blocks. Returns true if a distance was measured.
+ */
+bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distance);
+
+/*
+ * Run forever as the anchor (responder): answers POLL with POLL_ACK and RANGE
+ * with RANGE_REPORT, computing the DS-TWR distance and printing it via
+ * ESP_LOGI. Does NOT return.
+ */
+void dw1000_run_anchor(int irq_gpio);
 
 #ifdef __cplusplus
 }

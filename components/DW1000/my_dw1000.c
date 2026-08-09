@@ -14,6 +14,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "DW1000";
 
@@ -240,6 +242,28 @@ void dw1000_apply_config(void)
     dw1000_ll_commit_configuration();
 }
 
+/* One-call radio configuration (see header). */
+void dw1000_config(uint16_t network_id,
+                   uint16_t device_address,
+                   const uint8_t mode[3],
+                   uint8_t channel,
+                   uint16_t antenna_delay)
+{
+    dw1000_begin_config();
+    dw1000_set_defaults();   /* standard defaults (also enables the IRQ events) */
+
+    dw1000_set_network_id(network_id);
+    dw1000_set_device_address(device_address);
+    dw1000_enable_mode(mode);
+    dw1000_set_channel(channel);
+    dw1000_set_antenna_delay(antenna_delay);
+
+    dw1000_commit_config();
+
+    ESP_LOGI(TAG, "Radio configured:");
+    dw1000_print_device_info();
+}
+
 /* ============================ transceiver control ============================ */
 
 /* Put the radio in idle state (no RX / TX active). */
@@ -432,5 +456,177 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v)
     }
     if (vbat_v) {
         *vbat_v = v;
+    }
+}
+
+/* ============================ DS-TWR ranging ============================ */
+/* Implementation of the ready-to-use ranging engine declared in the header.
+   The tag drives the exchange; the anchor replies and computes the distance. */
+
+/* ranging state (file scope) */
+static uint8_t  s_data[DW1000_LEN_DATA];
+static uint8_t  s_last_sent_type;      /* tag: which frame was just transmitted */
+static uint64_t s_t1;                  /* tag: poll TX timestamp */
+static uint64_t s_t2, s_t3;            /* anchor: poll RX, poll_ack TX timestamp */
+static volatile bool s_result_ready;   /* true when a RANGE_REPORT arrived */
+static float  s_last_distance;         /* last measured distance (m) */
+static bool   s_tag_init_done;         /* run_tag radio setup done once */
+
+/* write a 40-bit timestamp into 5 little-endian bytes */
+static void put_ts(uint8_t *buf, uint64_t ts)
+{
+    int i;
+    for (i = 0; i < 5; i++) {
+        buf[i] = (uint8_t)((ts >> (i * 8)) & 0xFF);
+    }
+}
+
+/* read a 40-bit timestamp from 5 little-endian bytes */
+static uint64_t get_ts(const uint8_t *buf)
+{
+    uint64_t ts = 0;
+    int i;
+    for (i = 0; i < 5; i++) {
+        ts |= (uint64_t)buf[i] << (i * 8);
+    }
+    return ts;
+}
+
+/* Time difference with 40-bit rollover handling (mirrors DW1000Time::wrap).
+   The system counter wraps every 2^40 ticks (~17 s); if a difference goes
+   negative because later/earlier straddle the rollover, add 2^40 back. */
+static int64_t diff_ts(uint64_t later, uint64_t earlier)
+{
+    int64_t d = (int64_t)(later - earlier);
+    if (d < 0) {
+        d += (int64_t)0x10000000000LL;   /* 2^40 */
+    }
+    return d;
+}
+
+/* ---------------- tag side ---------------- */
+
+static void tag_on_sent(void)
+{
+    if (s_last_sent_type == DW1000_MSG_POLL) {
+        s_t1 = dw1000_get_tx_timestamp();
+    }
+}
+
+static void tag_on_received(void)
+{
+    uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
+    if (len < 1) {
+        return;
+    }
+
+    if (s_data[0] == DW1000_MSG_POLL_ACK) {
+        /* anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) */
+        uint64_t t4 = dw1000_get_rx_timestamp();
+        uint64_t now = dw1000_get_system_timestamp();
+        uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
+        /* + antenna delay: TX times must be antenna-referenced (like setDelay/TX_TIME) */
+        uint64_t t5 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
+
+        s_data[0] = DW1000_MSG_RANGE;
+        put_ts(s_data + 1,  s_t1);
+        put_ts(s_data + 6,  t4);
+        put_ts(s_data + 11, t5);
+        s_last_sent_type = DW1000_MSG_RANGE;
+        dw1000_send_at_ticks(s_data, DW1000_LEN_DATA, target);
+    } else if (s_data[0] == DW1000_MSG_RANGE_REPORT) {
+        memcpy(&s_last_distance, s_data + 1, sizeof(s_last_distance));
+        s_result_ready = true;
+        dw1000_start_receive();   /* re-arm for the next exchange */
+    }
+}
+
+bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distance)
+{
+    bool ok;
+
+    if (!s_tag_init_done) {
+        s_tag_init_done = true;
+        dw1000_irq_start(irq_gpio);
+        dw1000_receive_permanently(true);
+        dw1000_on_sent(tag_on_sent);
+        dw1000_on_received(tag_on_received);
+    }
+
+    /* start one exchange */
+    s_result_ready = false;
+    memset(s_data, 0, sizeof(s_data));
+    s_data[0] = DW1000_MSG_POLL;
+    s_last_sent_type = DW1000_MSG_POLL;
+    dw1000_send(s_data, DW1000_LEN_DATA);
+
+    /* wait for the result or the timeout */
+    TickType_t t0 = xTaskGetTickCount();
+    while (!s_result_ready &&
+           (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    ok = s_result_ready;
+    if (on_distance != NULL) {
+        return on_distance(ok ? s_last_distance : -1.0f);
+    }
+    return ok;
+}
+
+/* ---------------- anchor side ---------------- */
+
+static void anchor_on_received(void)
+{
+    uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
+    if (len < 1) {
+        return;
+    }
+
+    if (s_data[0] == DW1000_MSG_POLL) {
+        /* reply after REPLY_DELAY_US; the actual reply time is measured */
+        s_t2 = dw1000_get_rx_timestamp();
+        uint64_t now = dw1000_get_system_timestamp();
+        uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
+        /* + antenna delay: the TX timestamp must be antenna-referenced (like TX_TIME) */
+        s_t3 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
+
+        s_data[0] = DW1000_MSG_POLL_ACK;
+        dw1000_send_at_ticks(s_data, DW1000_LEN_DATA, target);
+    } else if (s_data[0] == DW1000_MSG_RANGE) {
+        /* we have T2/T3; RANGE carries T1/T4/T5; measure T6 now */
+        uint64_t t1 = get_ts(s_data + 1);
+        uint64_t t4 = get_ts(s_data + 6);
+        uint64_t t5 = get_ts(s_data + 11);
+        uint64_t t6 = dw1000_get_rx_timestamp();
+
+        /* asymmetric DS-TWR (arduino-dw1000 computeRangeAsymmetric) */
+        int64_t round1 = diff_ts(t4, t1);      /* tag:   poll -> ack rx */
+        int64_t reply1 = diff_ts(s_t3, s_t2);  /* anchor: poll rx -> ack tx */
+        int64_t round2 = diff_ts(t6, s_t3);    /* anchor: ack tx -> range rx */
+        int64_t reply2 = diff_ts(t5, t4);      /* tag:   ack rx -> range tx */
+        int64_t num = round1 * round2 - reply1 * reply2;
+        int64_t den = round1 + round2 + reply1 + reply2;
+        int64_t tof = (den != 0) ? (num / den) : 0;
+        float range = (float)tof * DW1000_METERS_PER_TICK;
+
+        ESP_LOGI(TAG, "RANGE OK: %.2f m", (double)range);
+
+        /* send the computed range back to the tag */
+        s_data[0] = DW1000_MSG_RANGE_REPORT;
+        memcpy(s_data + 1, &range, sizeof(range));
+        dw1000_send(s_data, DW1000_LEN_DATA);
+    }
+}
+
+void dw1000_run_anchor(int irq_gpio)
+{
+    dw1000_irq_start(irq_gpio);
+    dw1000_receive_permanently(true);
+    dw1000_on_received(anchor_on_received);
+    dw1000_start_receive();
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
