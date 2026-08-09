@@ -23,38 +23,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "esp_err.h"
+
+/* Register map + encoding constants (DW1000_RATE_*, DW1000_PRF_*,
+   DW1000_PREAMBLE_LEN_*, DW1000_CHANNEL_*, ...). */
+#include "dw1000_regs.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ============================ constants ============================ */
-
-/* Data transmission rate (DW1000DataRate) */
-#define DW1000_RATE_110KBPS   0x00
-#define DW1000_RATE_850KBPS   0x01
-#define DW1000_RATE_6800KBPS  0x02
-
-/* Pulse repetition frequency (DW1000PulseFrequency) */
-#define DW1000_PRF_16MHZ      0x01
-#define DW1000_PRF_64MHZ      0x02
-
-/* Preamble length (DW1000PreambleLength) */
-#define DW1000_PREAMBLE_LEN_64    0x01
-#define DW1000_PREAMBLE_LEN_128   0x05
-#define DW1000_PREAMBLE_LEN_256   0x09
-#define DW1000_PREAMBLE_LEN_512   0x0D
-#define DW1000_PREAMBLE_LEN_1024  0x02
-#define DW1000_PREAMBLE_LEN_1536  0x06
-#define DW1000_PREAMBLE_LEN_2048  0x0A
-#define DW1000_PREAMBLE_LEN_4096  0x03
-
-/* Operating channel (DW1000Channel) */
-#define DW1000_CHANNEL_1  1
-#define DW1000_CHANNEL_2  2
-#define DW1000_CHANNEL_3  3
-#define DW1000_CHANNEL_4  4
-#define DW1000_CHANNEL_5  5
-#define DW1000_CHANNEL_7  7
 
 /*
  * Pre-defined operating modes. Each is a 3-byte array
@@ -88,6 +65,12 @@ bool dw1000_probe(void);
 /* Print device ID, EUI, network/address and mode to the ESP log. */
 void dw1000_print_device_info(void);
 
+/* Fill a caller-provided buffer (>= 128 bytes) with printable info. */
+void dw1000_get_device_id(char *buf);   /* starts with "DECA" on a real DW1000 */
+void dw1000_get_eui(char *buf);
+void dw1000_get_net_addr(char *buf);
+void dw1000_get_device_mode(char *buf);
+
 /* ============================ addressing ============================ */
 
 /* Set the 8-byte extended unique identifier, e.g. "AA:BB:CC:DD:EE:FF:00:11". */
@@ -112,10 +95,20 @@ uint16_t dw1000_get_antenna_delay(void);
 /* Select one of the DW1000_MODE_* presets (3-byte array). */
 void dw1000_enable_mode(const uint8_t mode[3]);
 
+/* Load the driver's standard defaults (frame filter off, channel 5, ...). */
+void dw1000_set_defaults(void);
+
 /*
- * Apply all pending RF settings. Equivalent to the driver's
- * newConfiguration() + commitConfiguration().
+ * Two-phase RF configuration. The dw1000_set_*() calls only update the
+ * driver's cached configuration:
+ *   1. dw1000_begin_config();   // idle + load current chip state
+ *   2. dw1000_set_*();          // modify the caches
+ *   3. dw1000_commit_config();  // write everything + re-tune the radio
  */
+void dw1000_begin_config(void);
+void dw1000_commit_config(void);
+
+/* Convenience: begin_config() + commit_config(). */
 void dw1000_apply_config(void);
 
 /* ============================ transceiver control ============================ */
@@ -175,6 +168,19 @@ void dw1000_on_received(dw1000_handler_t cb);
 void dw1000_on_receive_failed(dw1000_handler_t cb);
 void dw1000_on_receive_timeout(dw1000_handler_t cb);
 void dw1000_on_receive_timestamp_available(dw1000_handler_t cb);
+
+/* Enable / disable which events raise the DW1000 IRQ pin (write the SYS_MASK
+   cache; apply it with dw1000_commit_config()). */
+void dw1000_interrupt_on_sent(bool enable);
+void dw1000_interrupt_on_received(bool enable);
+void dw1000_interrupt_on_receive_failed(bool enable);
+void dw1000_interrupt_on_receive_timeout(bool enable);
+void dw1000_interrupt_on_receive_timestamp_available(bool enable);
+
+/* Configure the IRQ GPIO and start the interrupt dispatch task. Call once
+   after the radio is configured. The handlers attached with dw1000_on_*()
+   run in a high-priority task (not ISR context). */
+esp_err_t dw1000_irq_start(uint8_t irq_gpio);
 
 /* ============================ diagnostics ============================ */
 
