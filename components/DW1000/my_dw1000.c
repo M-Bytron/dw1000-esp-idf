@@ -508,6 +508,8 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v)
 #define DW1000_OFF_T1      (DW1000_HDR_LEN + 1)
 #define DW1000_OFF_T4      (DW1000_HDR_LEN + 6)
 #define DW1000_OFF_T5      (DW1000_HDR_LEN + 11)
+#define DW1000_OFF_CAL_SESSION (DW1000_HDR_LEN + 1)   /* calibration session id    */
+#define DW1000_OFF_CAL_AD      (DW1000_HDR_LEN + 2)   /* new antenna delay (2 B LE) */
 
 /* ranging state (file scope) */
 static uint8_t  s_data[DW1000_HDR_LEN + DW1000_LEN_DATA];
@@ -518,6 +520,11 @@ static volatile bool s_result_ready;   /* true when a RANGE_REPORT arrived */
 static float  s_last_distance;         /* last measured distance (m) */
 static bool   s_tag_init_done;         /* run_tag radio setup done once */
 static uint8_t s_seq;                  /* IEEE header sequence counter */
+
+/* calibration message state (CAL_SET tag->anchor / CAL_ACK anchor->tag) */
+static volatile bool s_cal_ack_received = false;  /* true when a CAL_ACK arrived   */
+static uint16_t      s_cal_ack_ad       = 0;      /* antenna delay the anchor set  */
+static uint8_t       s_cal_session      = 0;      /* calibration session counter   */
 
 /* write the IEEE 802.15.4 header (extended addressing) in front of the payload */
 static void build_header(uint8_t *buf, uint16_t pan,
@@ -637,6 +644,14 @@ static void tag_on_received(void)
         memcpy(&s_last_distance, s_data + DW1000_OFF_T1, sizeof(s_last_distance));
         s_result_ready = true;
         dw1000_start_receive();   /* re-arm for the next exchange */
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_CAL_ACK) {
+        /* the anchor applied the antenna delay we asked for */
+        s_cal_ack_ad = (uint16_t)(s_data[DW1000_OFF_CAL_AD] |
+                                  ((uint16_t)s_data[DW1000_OFF_CAL_AD + 1] << 8));
+        s_cal_ack_received = true;
+        ESP_LOGI(TAG, "TAG RX: CAL_ACK session=%u antenna_delay=%u",
+                 (unsigned)s_data[DW1000_OFF_CAL_SESSION], (unsigned)s_cal_ack_ad);
+        dw1000_start_receive();   /* re-arm for the next exchange */
     }
 }
 
@@ -743,6 +758,27 @@ static void anchor_on_received(void)
         memcpy(s_data + DW1000_OFF_T1, &range, sizeof(range));
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_CAL_SET) {
+        /* calibration: the tag asks us to apply a new shared antenna delay */
+        uint8_t  session = s_data[DW1000_OFF_CAL_SESSION];
+        uint16_t new_ad  = (uint16_t)(s_data[DW1000_OFF_CAL_AD] |
+                                      ((uint16_t)s_data[DW1000_OFF_CAL_AD + 1] << 8));
+
+        ESP_LOGI(TAG, "ANCHOR: CAL_SET session=%u - applying antenna_delay=%u",
+                 (unsigned)session, (unsigned)new_ad);
+        dw1000_set_antenna_delay(new_ad);
+        dw1000_commit_config();   /* writes TX_ANTD + LDE_RXANTD */
+        ESP_LOGI(TAG, "ANCHOR: antenna_delay=%u applied (TX_ANTD + LDE_RXANTD)",
+                 (unsigned)new_ad);
+
+        /* acknowledge so the tag can continue to the next iteration */
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE]        = DW1000_MSG_CAL_ACK;
+        s_data[DW1000_OFF_CAL_SESSION] = session;
+        s_data[DW1000_OFF_CAL_AD]      = new_ad & 0xFF;
+        s_data[DW1000_OFF_CAL_AD + 1]  = (uint8_t)(new_ad >> 8);
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     }
 }
 
@@ -797,7 +833,9 @@ void dw1000_set_peer_eui(const uint8_t peer_mac[6])
  * measured distance that reads too large is fixed by INCREASING the delay.
  * Call it again after a fresh reading to refine (it converges).
  */
-uint16_t dw1000_calibrate_antenna_delay(float known_distance_cm)
+/* Compute the antenna delay (in raw ticks) that would make the last measured
+   distance equal the known distance. Pure math - no radio write. */
+static uint16_t dw1000_compute_ideal_antenna_delay(float known_distance_cm)
 {
     uint16_t old_ad = dw1000_get_antenna_delay();
     float true_m = known_distance_cm / 100.0f;
@@ -820,12 +858,165 @@ uint16_t dw1000_calibrate_antenna_delay(float known_distance_cm)
     if (new_ad > 0xFFFF) {
         new_ad = 0xFFFF;
     }
+    return (uint16_t)new_ad;
+}
 
-    dw1000_set_antenna_delay((uint16_t)new_ad);
+uint16_t dw1000_calibrate_antenna_delay(float known_distance_cm)
+{
+    uint16_t old_ad = dw1000_get_antenna_delay();
+    uint16_t new_ad = dw1000_compute_ideal_antenna_delay(known_distance_cm);
+
+    dw1000_set_antenna_delay(new_ad);
     dw1000_commit_config();   /* write TX_ANTD + LDE_RXANTD to the chip */
 
-    ESP_LOGI(TAG, "Calibrate: known=%.2f m measured=%.2f m -> antenna_delay %u (was %u, corr %d)",
-             (double)true_m, (double)meas_m,
-             (unsigned)new_ad, (unsigned)old_ad, (int)corr);
-    return (uint16_t)new_ad;
+    ESP_LOGI(TAG, "Calibrate: known=%.2f m measured=%.2f m -> antenna_delay %u (was %u)",
+             (double)(known_distance_cm / 100.0f), (double)s_last_distance,
+             (unsigned)new_ad, (unsigned)old_ad);
+    return new_ad;
+}
+
+/* Tag side: tell the anchor to apply `new_ad` and wait for its CAL_ACK.
+   Returns true when the anchor confirmed (and applied the same value). */
+static bool dw1000_send_cal_set_and_wait(uint16_t new_ad, uint16_t timeout_ms)
+{
+    uint8_t session = ++s_cal_session;
+    TickType_t t0;
+
+    s_cal_ack_received = false;
+    s_cal_ack_ad = 0;
+
+    memset(s_data, 0, sizeof(s_data));
+    s_data[DW1000_OFF_TYPE]        = DW1000_MSG_CAL_SET;
+    s_data[DW1000_OFF_CAL_SESSION] = session;
+    s_data[DW1000_OFF_CAL_AD]      = new_ad & 0xFF;
+    s_data[DW1000_OFF_CAL_AD + 1]  = (uint8_t)(new_ad >> 8);
+    build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+    dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+
+    t0 = xTaskGetTickCount();
+    while (!s_cal_ack_received &&
+           (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    if (!s_cal_ack_received) {
+        ESP_LOGW(TAG, "CALIBRATE: no CAL_ACK from the anchor within %u ms (session %u)",
+                 (unsigned)timeout_ms, (unsigned)session);
+        return false;
+    }
+    if (s_cal_ack_ad != new_ad) {
+        ESP_LOGW(TAG, "CALIBRATE: anchor acked a DIFFERENT antenna_delay %u (sent %u)",
+                 (unsigned)s_cal_ack_ad, (unsigned)new_ad);
+    }
+    return true;
+}
+
+uint16_t dw1000_calibrate_antenna_delay_iterative(
+        int irq_gpio, float known_distance_cm,
+        uint16_t convergence_threshold_ticks, int max_iterations,
+        dw1000_distance_cb_t on_distance)
+{
+    uint16_t current_ad = dw1000_get_antenna_delay();
+    uint16_t calc_ad = 0, new_ad = current_ad;
+    bool converged = false, any_reading = false, any_acked = false;
+    int iter;
+
+    if (known_distance_cm <= 0.0f || max_iterations <= 0) {
+        ESP_LOGE(TAG, "CALIBRATE: bad args (known_distance_cm=%d, max_iterations=%d)",
+                 (int)known_distance_cm, max_iterations);
+        return 0;
+    }
+
+    ESP_LOGI(TAG, "CALIBRATE: START - known distance %.2f m, initial antenna_delay=%u, "
+                  "threshold <%u ticks, max %d iterations",
+             (double)(known_distance_cm / 100.0f), (unsigned)current_ad,
+             (unsigned)convergence_threshold_ticks, max_iterations);
+
+    for (iter = 1; iter <= max_iterations; iter++) {
+        ESP_LOGI(TAG, "CALIBRATE: ---- iteration %d/%d - current antenna_delay=%u",
+                 iter, max_iterations, (unsigned)current_ad);
+
+        /* 1) one ranging exchange -> measured distance */
+        if (!dw1000_run_tag(irq_gpio, DW1000_RANGE_TIMEOUT_MS, on_distance)) {
+            ESP_LOGW(TAG, "CALIBRATE: iteration %d - no range reading, retrying", iter);
+            continue;
+        }
+        any_reading = true;
+        ESP_LOGI(TAG, "CALIBRATE: iteration %d - measured %.3f m (known %.2f m)",
+                 iter, (double)s_last_distance, (double)(known_distance_cm / 100.0f));
+
+        /* 2) antenna delay that would make measured == known */
+        calc_ad = dw1000_compute_ideal_antenna_delay(known_distance_cm);
+        ESP_LOGI(TAG, "CALIBRATE: iteration %d - calculated ideal antenna_delay=%u",
+                 iter, (unsigned)calc_ad);
+
+        /* 3) average -> move halfway to the ideal (can never overshoot) */
+        new_ad = (uint16_t)(((uint32_t)current_ad + calc_ad) >> 1);
+        ESP_LOGI(TAG, "CALIBRATE: iteration %d - new antenna_delay=(%u+%u)/2=%u",
+                 iter, (unsigned)current_ad, (unsigned)calc_ad, (unsigned)new_ad);
+
+        /* 4) apply the shared value on THIS board */
+        dw1000_set_antenna_delay(new_ad);
+        dw1000_commit_config();
+        ESP_LOGI(TAG, "CALIBRATE: iteration %d - applied antenna_delay=%u on this board",
+                 iter, (unsigned)new_ad);
+
+        /* 5) send it to the anchor and wait for its CAL_ACK */
+        if (dw1000_send_cal_set_and_wait(new_ad, DW1000_CAL_ACK_TIMEOUT_MS)) {
+            any_acked = true;
+            ESP_LOGI(TAG, "CALIBRATE: iteration %d - anchor applied antenna_delay=%u (ACK)",
+                     iter, (unsigned)new_ad);
+        } else {
+            ESP_LOGW(TAG, "CALIBRATE: iteration %d - anchor did NOT confirm; "
+                          "antenna_delay=%u set on this board only",
+                     iter, (unsigned)new_ad);
+        }
+
+        /* 6) convergence: |calc_ad - current_ad| below the threshold? */
+        {
+            int32_t diff = (int32_t)calc_ad - (int32_t)current_ad;
+            if (diff < 0) {
+                diff = -diff;
+            }
+            ESP_LOGI(TAG, "CALIBRATE: iteration %d - |calc - current| = %d ticks "
+                          "(threshold %u)",
+                     iter, (int)diff, (unsigned)convergence_threshold_ticks);
+            current_ad = new_ad;
+            if (diff < (int32_t)convergence_threshold_ticks) {
+                converged = true;
+                break;
+            }
+        }
+    }
+
+    if (converged) {
+        ESP_LOGI(TAG, "CALIBRATE: CONVERGED after %d iteration(s) - "
+                      "final shared antenna_delay=%u (put this on BOTH boards)",
+                 iter, (unsigned)current_ad);
+    } else if (!any_reading) {
+        ESP_LOGE(TAG, "CALIBRATE: FAILED - never got a range reading");
+        return 0;
+    } else if (!any_acked) {
+        ESP_LOGW(TAG, "CALIBRATE: finished without any anchor confirmation - "
+                      "antenna_delay=%u set on this board only",
+                 (unsigned)current_ad);
+    } else {
+        ESP_LOGW(TAG, "CALIBRATE: %d iteration(s) used without converging - "
+                      "last antenna_delay=%u",
+                 max_iterations, (unsigned)current_ad);
+    }
+
+    /* final sanity check: one more reading with the shared value */
+    if (converged) {
+        bool ok = dw1000_run_tag(irq_gpio, DW1000_RANGE_TIMEOUT_MS, on_distance);
+        if (ok) {
+            ESP_LOGI(TAG, "CALIBRATE: verify - measured %.3f m (known %.2f m) "
+                          "with antenna_delay=%u",
+                     (double)s_last_distance, (double)(known_distance_cm / 100.0f),
+                     (unsigned)current_ad);
+        } else {
+            ESP_LOGW(TAG, "CALIBRATE: verify - no reading with the final value");
+        }
+    }
+    return current_ad;
 }

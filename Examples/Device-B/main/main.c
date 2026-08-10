@@ -1,14 +1,14 @@
 /*
- * DW1000 ESP-IDF example - Device A (TAG / ranging initiator)
+ * DW1000 ESP-IDF example - Device B (ANCHOR / ranging responder)
  *
- * Demonstrates the DW1000 component library:
- *   1. init + probe (wiring check)
- *   2. radio configuration
- *   3. pairing with a specific peer (by its ESP32 BLE MAC)
- *   4. optional joint antenna-delay calibration (CALIBRATE_DISTANCE_CM)
- *   5. continuous DS-TWR ranging (prints the distance)
+ * Answers a paired TAG:
+ *   - replies to POLL with POLL_ACK,
+ *   - computes the DS-TWR distance and sends it back (RANGE_REPORT),
+ *   - accepts joint antenna-delay calibration updates from the tag
+ *     (CAL_SET / CAL_ACK) so both boards stay in sync.
  *
- * The matching ANCHOR (responder) example is Examples/Device-B.
+ * Runs forever (never returns). No calibration is started here - the TAG
+ * drives the calibration (see Examples/Device-A).
  *
  * Build / flash / monitor:
  *   idf.py set-target esp32
@@ -39,29 +39,13 @@ const uint8_t PIN_RST  = 32;
 /* ------------------- shared radio settings -------------------
    The PAN, channel and mode MUST match on both boards. */
 #define MY_PAN_ID        0xDECA
-#define MY_SHORT_ADDR    0x1001   /* Device A */
+#define MY_SHORT_ADDR    0x1002   /* Device B */
 uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
-
-/* Joint antenna-delay calibration. Put the two modules exactly this many cm
-   apart (clear line of sight), boot BOTH boards with the same value, and the
-   tag calibrates both radios over the air. Set to 0 to skip calibration. */
-#define CALIBRATE_DISTANCE_CM  0
 
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
-   printed at boot as "My BLE MAC: ..."). Device A uses Device B's MAC. */
-static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE3, 0xA4, 0x6E};
-
-/* ------------------------- callback ------------------------ */
-static bool on_distance(float distance_m, bool got_reading)
-{
-    if (!got_reading) {
-        ESP_LOGI("DW1000", "RANGE TIMEOUT (no data)");
-        return false;
-    }
-    ESP_LOGI("DW1000", "DISTANCE: %.2f m", (double)distance_m);
-    return true;
-}
+   printed at boot as "My BLE MAC: ..."). Device B uses Device A's MAC. */
+static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE4, 0xC3, 0x82};
 
 /* -------------------------- task --------------------------- */
 static void dw1000_radio_task(void *arg)
@@ -91,28 +75,11 @@ static void dw1000_radio_task(void *arg)
                   DW1000_MODE_SHORTDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, antenna_delay);
 
-    /* 4. pair with the anchor */
+    /* 4. pair with the tag */
     dw1000_set_peer_eui(peer_eui);
 
-    /* 5a. optional joint antenna-delay calibration */
-    if (CALIBRATE_DISTANCE_CM > 0) {
-        ESP_LOGI("DW1000", "Joint calibration: known distance %d cm",
-                 (int)CALIBRATE_DISTANCE_CM);
-        uint16_t ad = dw1000_calibrate_antenna_delay_iterative(
-                          PIN_IRQ,
-                          (float)CALIBRATE_DISTANCE_CM,
-                          DW1000_CAL_CONVERGENCE_TICKS,
-                          DW1000_CAL_MAX_ITERATIONS,
-                          on_distance);
-        ESP_LOGI("DW1000", "CALIBRATION DONE: antenna_delay = %u "
-                           "(set this on BOTH boards)", (unsigned)ad);
-    }
-
-    /* 5b. continuous DS-TWR ranging */
-    while (1) {
-        dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance);
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
+    /* 5. answer ranging + calibration requests forever */
+    dw1000_run_anchor(PIN_IRQ);
 }
 
 void app_main(void)

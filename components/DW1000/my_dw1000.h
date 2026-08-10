@@ -251,12 +251,19 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v);
 #define DW1000_MSG_POLL_ACK     1   /* anchor -> tag: reply to the poll        */
 #define DW1000_MSG_RANGE        2   /* tag -> anchor: carries T1 / T4 / T5     */
 #define DW1000_MSG_RANGE_REPORT 3   /* anchor -> tag: computed distance (float) */
+#define DW1000_MSG_CAL_SET      4   /* tag -> anchor: apply this antenna delay  */
+#define DW1000_MSG_CAL_ACK      5   /* anchor -> tag: new antenna delay applied */
 
 #define DW1000_LEN_DATA         16     /* payload length of a ranging frame;
                                            the full frame adds a 21-byte IEEE
                                            802.15.4 extended-address header    */
 #define DW1000_REPLY_DELAY_US   3000u  /* nominal reply delay (measured anyway) */
 #define DW1000_RANGE_TIMEOUT_MS 1000   /* tag: max wait for a result, ms        */
+
+/* Joint antenna-delay calibration defaults (dw1000_calibrate_antenna_delay_iterative). */
+#define DW1000_CAL_CONVERGENCE_TICKS 5    /* stop when |calc_ad - current_ad| < this */
+#define DW1000_CAL_MAX_ITERATIONS    20   /* safety cap on the calibration loop      */
+#define DW1000_CAL_ACK_TIMEOUT_MS    500  /* tag: max wait for the anchor's CAL_ACK  */
 
 /* Callback for the tag's ranging result.
    - got_reading == true  : distance_m is a real measured distance (meters).
@@ -308,6 +315,51 @@ void dw1000_run_anchor(int irq_gpio);
  * reading to refine.
  */
 uint16_t dw1000_calibrate_antenna_delay(float known_distance_cm);
+
+/*
+ * Joint antenna-delay calibration for BOTH boards (run on the TAG / initiator).
+ *
+ * The problem with dw1000_calibrate_antenna_delay() above is that it applies
+ * the FULL correction to this board only - and because both boards carry the
+ * same antenna delay in their TX_ANTD and LDE_RXANTD registers, applying a
+ * full correction to both boards overshoots and the error flips sign. This
+ * routine instead converges both boards to ONE shared value in small steps,
+ * so it can never overshoot:
+ *
+ *   repeat:
+ *     1. run one ranging exchange and measure the distance
+ *     2. calc_ad = the antenna delay that would make measured == known
+ *        (the same formula as dw1000_calibrate_antenna_delay)
+ *     3. new_ad  = (current_ad + calc_ad) / 2      <- average / step halfway
+ *     4. apply new_ad on THIS board
+ *     5. send a CAL_SET(new_ad) frame to the anchor; the anchor applies the
+ *        SAME value to its radio and answers with a CAL_ACK
+ *     6. stop when |calc_ad - current_ad| < convergence_threshold_ticks
+ *
+ * Because each step only moves halfway to the ideal value and both boards
+ * always carry the same value, the correction converges monotonically to the
+ * shared antenna delay where the measured distance matches the known one.
+ *
+ * Place the modules exactly known_distance_cm apart (clear line of sight),
+ * boot BOTH boards with the same known distance, and call this on the tag.
+ *
+ *   irq_gpio          - tag IRQ GPIO (as passed to dw1000_run_tag)
+ *   known_distance_cm - true physical distance between the modules, in cm
+ *   convergence_threshold_ticks - stop threshold (5 ticks ~= 2.3 cm)
+ *   max_iterations    - safety cap; calibration normally finishes in 2-4
+ *   on_distance       - optional result callback forwarded to dw1000_run_tag
+ *                       (may be NULL)
+ *
+ * Returns the final shared antenna delay (raw ticks) to put into
+ * antenna_delay on BOTH boards, or 0 if calibration could not complete
+ * (no range reading / no CAL_ACK from the anchor). Logs every step.
+ */
+uint16_t dw1000_calibrate_antenna_delay_iterative(
+        int irq_gpio,
+        float known_distance_cm,
+        uint16_t convergence_threshold_ticks,
+        int max_iterations,
+        dw1000_distance_cb_t on_distance);
 
 #ifdef __cplusplus
 }

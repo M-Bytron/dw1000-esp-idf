@@ -3,4 +3,4 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(DWM1000-A)
+project(DWM1000)

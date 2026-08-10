@@ -1,6 +1,4 @@
-# DW1000 ESP-IDF library - common sdkconfig defaults
-#
-# Console (idf.py monitor) runs on UART0 at 115200 baud by default.
+# DW1000 Device-A example - common sdkconfig defaults
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_NUM=0
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
