@@ -265,7 +265,7 @@ void dw1000_config(uint16_t network_id,
     {
         uint8_t mac[6];
         int i;
-        if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
+        if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
             for (i = 0; i < 6; i++) {
                 s_own_eui[i] = mac[5 - i];   /* register order: LSB first */
             }
