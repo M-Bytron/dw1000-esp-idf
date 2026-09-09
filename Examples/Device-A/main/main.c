@@ -50,7 +50,7 @@ uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
    printed at boot as "My BLE MAC: ..."). Device A uses Device B's MAC. */
-static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE3, 0xA4, 0x6E};
+static const uint8_t peer_eui[6] = {0x3C, 0x61, 0x05, 0x12, 0xC9, 0x48};
 
 /* ------------------------- callback ------------------------ */
 static bool on_distance(float distance_m, bool got_reading)
@@ -95,23 +95,31 @@ static void dw1000_radio_task(void *arg)
     dw1000_set_peer_eui(peer_eui);
 
     /* 5a. optional joint antenna-delay calibration */
-    if (CALIBRATE_DISTANCE_CM > 0) {
-        ESP_LOGI("DW1000", "Joint calibration: known distance %d cm",
-                 (int)CALIBRATE_DISTANCE_CM);
-        uint16_t ad = dw1000_calibrate_antenna_delay_iterative(
-                          PIN_IRQ,
-                          (float)CALIBRATE_DISTANCE_CM,
-                          DW1000_CAL_CONVERGENCE_TICKS,
-                          DW1000_CAL_MAX_ITERATIONS,
-                          on_distance);
-        ESP_LOGI("DW1000", "CALIBRATION DONE: antenna_delay = %u "
-                           "(set this on BOTH boards)", (unsigned)ad);
-    }
+    // if (CALIBRATE_DISTANCE_CM > 0) {
+    //     ESP_LOGI("DW1000", "Joint calibration: known distance %d cm",
+    //              (int)CALIBRATE_DISTANCE_CM);
+    //     uint16_t ad = dw1000_calibrate_antenna_delay_iterative(
+    //                       PIN_IRQ,
+    //                       (float)CALIBRATE_DISTANCE_CM,
+    //                       DW1000_CAL_CONVERGENCE_TICKS,
+    //                       DW1000_CAL_MAX_ITERATIONS,
+    //                       on_distance);
+    //     ESP_LOGI("DW1000", "CALIBRATION DONE: antenna_delay = %u "
+    //                        "(set this on BOTH boards)", (unsigned)ad);
+    // }
+
+    int ping_counter = 0;
 
     /* 5b. continuous DS-TWR ranging */
     while (1) {
-        dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
+
+        bool ok = dw1000_ping(PIN_IRQ, 100);
+        ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
+        ping_counter++;
+        if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
+        else ESP_LOGW("MAIN", "NO Ping");
+        vTaskDelay(pdMS_TO_TICKS(700));
     }
 }
 

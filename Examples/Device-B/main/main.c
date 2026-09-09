@@ -45,7 +45,7 @@ uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
    printed at boot as "My BLE MAC: ..."). Device B uses Device A's MAC. */
-static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE4, 0xC3, 0x82};
+static const uint8_t peer_eui[6] = {0x28, 0x05, 0xA5, 0x2A, 0x66, 0xCC};
 
 /* -------------------------- task --------------------------- */
 static void dw1000_radio_task(void *arg)
@@ -80,6 +80,17 @@ static void dw1000_radio_task(void *arg)
 
     /* 5. answer ranging + calibration requests forever */
     dw1000_run_anchor(PIN_IRQ);
+
+    // int ping_counter = 0;
+
+    // while(1){
+    //     bool ok = dw1000_ping(PIN_IRQ, 100);
+    //     ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
+    //     ping_counter++;
+    //     if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
+    //     else ESP_LOGW("MAIN", "NO Ping");
+    //     vTaskDelay(pdMS_TO_TICKS(500));
+    // }
 }
 
 void app_main(void)

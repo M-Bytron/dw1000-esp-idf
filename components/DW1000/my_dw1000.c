@@ -30,6 +30,7 @@ static uint16_t s_pan_id       = 0xFFFF;
 static uint8_t  s_own_eui[8];
 static uint8_t  s_peer_eui[8]  = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static bool     s_peer_set     = false;
+uint16_t rx_counter = 0;
 
 /* ============================ mode presets ============================ */
 
@@ -48,6 +49,9 @@ const uint8_t DW1000_MODE_LONGDATA_RANGE_ACCURACY[3] =
 
 /* ============================ init / probe ============================ */
 
+void dw1000_on_received(dw1000_handler_t cb);
+static void my_dw1000_on_received(void);
+
 void dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
                  uint8_t cs, uint8_t irq, uint8_t rst)
 {
@@ -64,7 +68,16 @@ void dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
 
     /* Chip-select defaults + LDE microcode load (required before RX works). */
     dw1000_ll_init_defaults();
-    dw1000_ll_manage_lde();
+    dw1000_ll_manage_lde();   
+
+    ESP_LOGW(TAG, "dw1000_irq_start(irq)");
+    dw1000_irq_start(irq);
+
+    // ESP_LOGW(TAG, "dw1000_receive_permanently");
+    // dw1000_receive_permanently(true);
+
+    ESP_LOGW(TAG, "Register DW1000 Callback");
+    dw1000_on_received(my_dw1000_on_received);
 
     ESP_LOGI(TAG, "Driver initialized (pure C). Probing the DW1000 ...");
 }
@@ -595,12 +608,12 @@ static void tag_on_sent(void)
     }
 }
 
-static void tag_on_received(void)
+/*static void tag_on_received(void)
 {
     uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
     if (len < DW1000_HDR_LEN + 1) {
         ESP_LOGW(TAG, "TAG RX: short frame len=%u", (unsigned)len);
-        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
     if (!is_peer(s_data)) {
@@ -609,7 +622,7 @@ static void tag_on_received(void)
                  (unsigned)s_data[DW1000_OFF_TYPE],
                  (unsigned)e[7], (unsigned)e[6], (unsigned)e[5], (unsigned)e[4],
                  (unsigned)e[3], (unsigned)e[2], (unsigned)e[1], (unsigned)e[0]);
-        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
     if (!is_addressed_to_me(s_data)) {
@@ -618,18 +631,18 @@ static void tag_on_received(void)
                  (unsigned)s_data[DW1000_OFF_TYPE],
                  (unsigned)d[7], (unsigned)d[6], (unsigned)d[5], (unsigned)d[4],
                  (unsigned)d[3], (unsigned)d[2], (unsigned)d[1], (unsigned)d[0]);
-        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
-    // ESP_LOGI(TAG, "TAG RX: peer frame type=%u len=%u",
-    //          (unsigned)s_data[DW1000_OFF_TYPE], (unsigned)len);
+    ESP_LOGI(TAG, "TAG RX: peer frame type=%u len=%u",
+             (unsigned)s_data[DW1000_OFF_TYPE], (unsigned)len);
 
     if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL_ACK) {
-        /* anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) */
+        // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
         uint64_t t4 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
         uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
-        /* + antenna delay: TX times must be antenna-referenced (like setDelay/TX_TIME) */
+        // + antenna delay: TX times must be antenna-referenced (like setDelay/TX_TIME) 
         uint64_t t5 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
 
         memset(s_data, 0, sizeof(s_data));
@@ -643,17 +656,17 @@ static void tag_on_received(void)
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE_REPORT) {
         memcpy(&s_last_distance, s_data + DW1000_OFF_T1, sizeof(s_last_distance));
         s_result_ready = true;
-        dw1000_start_receive();   /* re-arm for the next exchange */
+        dw1000_start_receive();   // re-arm for the next exchange 
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_CAL_ACK) {
-        /* the anchor applied the antenna delay we asked for */
+        // the anchor applied the antenna delay we asked for 
         s_cal_ack_ad = (uint16_t)(s_data[DW1000_OFF_CAL_AD] |
                                   ((uint16_t)s_data[DW1000_OFF_CAL_AD + 1] << 8));
         s_cal_ack_received = true;
         ESP_LOGI(TAG, "TAG RX: CAL_ACK session=%u antenna_delay=%u",
                  (unsigned)s_data[DW1000_OFF_CAL_SESSION], (unsigned)s_cal_ack_ad);
-        dw1000_start_receive();   /* re-arm for the next exchange */
+        dw1000_start_receive();   // re-arm for the next exchange 
     }
-}
+}*/
 
 bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distance)
 {
@@ -663,11 +676,14 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
         s_tag_init_done = true;
         dw1000_irq_start(irq_gpio);
         dw1000_receive_permanently(true);
-        dw1000_on_sent(tag_on_sent);
-        dw1000_on_received(tag_on_received);
+        // dw1000_on_sent(tag_on_sent);
+        if (s_last_sent_type == DW1000_MSG_POLL) {
+            s_t1 = dw1000_get_tx_timestamp();
+        }
+        // dw1000_on_received(my_dw1000_on_received);
     }
 
-    /* start one exchange */
+    // start one exchange */
     s_result_ready = false;
     memset(s_data, 0, sizeof(s_data));
     s_data[DW1000_OFF_TYPE] = DW1000_MSG_POLL;
@@ -675,7 +691,7 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
     s_last_sent_type = DW1000_MSG_POLL;
     dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
 
-    /* wait for the result or the timeout */
+    // wait for the result or the timeout */
     TickType_t t0 = xTaskGetTickCount();
     while (!s_result_ready &&
            (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
@@ -691,12 +707,12 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
 
 /* ---------------- anchor side ---------------- */
 
-static void anchor_on_received(void)
+/*static void anchor_on_received(void)
 {
     uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
     if (len < DW1000_HDR_LEN + 1) {
         ESP_LOGW(TAG, "ANCHOR RX: short frame len=%u", (unsigned)len);
-        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
     if (!is_peer(s_data)) {
@@ -705,7 +721,7 @@ static void anchor_on_received(void)
                  (unsigned)s_data[DW1000_OFF_TYPE],
                  (unsigned)e[7], (unsigned)e[6], (unsigned)e[5], (unsigned)e[4],
                  (unsigned)e[3], (unsigned)e[2], (unsigned)e[1], (unsigned)e[0]);
-        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
     if (!is_addressed_to_me(s_data)) {
@@ -714,18 +730,18 @@ static void anchor_on_received(void)
                  (unsigned)s_data[DW1000_OFF_TYPE],
                  (unsigned)d[7], (unsigned)d[6], (unsigned)d[5], (unsigned)d[4],
                  (unsigned)d[3], (unsigned)d[2], (unsigned)d[1], (unsigned)d[0]);
-        dw1000_start_receive();   /* re-arm: we dropped this frame */
+        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
-    // ESP_LOGI(TAG, "ANCHOR RX: peer frame type=%u len=%u",
-    //          (unsigned)s_data[DW1000_OFF_TYPE], (unsigned)len);
+    ESP_LOGI(TAG, "ANCHOR RX: peer frame type=%u len=%u",
+             (unsigned)s_data[DW1000_OFF_TYPE], (unsigned)len);
 
     if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL) {
-        /* reply after REPLY_DELAY_US; the actual reply time is measured */
+        // reply after REPLY_DELAY_US; the actual reply time is measured 
         s_t2 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
         uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
-        /* + antenna delay: the TX timestamp must be antenna-referenced (like TX_TIME) */
+        // + antenna delay: the TX timestamp must be antenna-referenced (like TX_TIME) 
         s_t3 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
 
         memset(s_data, 0, sizeof(s_data));
@@ -733,33 +749,33 @@ static void anchor_on_received(void)
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE) {
-        /* we have T2/T3; RANGE carries T1/T4/T5; measure T6 now */
+        // we have T2/T3; RANGE carries T1/T4/T5; measure T6 now 
         uint64_t t1 = get_ts(s_data + DW1000_OFF_T1);
         uint64_t t4 = get_ts(s_data + DW1000_OFF_T4);
         uint64_t t5 = get_ts(s_data + DW1000_OFF_T5);
         uint64_t t6 = dw1000_get_rx_timestamp();
 
-        /* asymmetric DS-TWR (arduino-dw1000 computeRangeAsymmetric) */
-        int64_t round1 = diff_ts(t4, t1);      /* tag:   poll -> ack rx */
-        int64_t reply1 = diff_ts(s_t3, s_t2);  /* anchor: poll rx -> ack tx */
-        int64_t round2 = diff_ts(t6, s_t3);    /* anchor: ack tx -> range rx */
-        int64_t reply2 = diff_ts(t5, t4);      /* tag:   ack rx -> range tx */
+        // asymmetric DS-TWR (arduino-dw1000 computeRangeAsymmetric) 
+        int64_t round1 = diff_ts(t4, t1);      // tag:   poll -> ack rx 
+        int64_t reply1 = diff_ts(s_t3, s_t2);  // anchor: poll rx -> ack tx 
+        int64_t round2 = diff_ts(t6, s_t3);    // anchor: ack tx -> range rx 
+        int64_t reply2 = diff_ts(t5, t4);      // tag:   ack rx -> range tx 
         int64_t num = round1 * round2 - reply1 * reply2;
         int64_t den = round1 + round2 + reply1 + reply2;
         int64_t tof = (den != 0) ? (num / den) : 0;
         float range = (float)tof * DW1000_METERS_PER_TICK;
-        s_last_distance = range;   /* remember so calibration can use it */
+        s_last_distance = range;   // remember so calibration can use it 
 
         ESP_LOGI(TAG, "RANGE OK: %.2f m", (double)range);
 
-        /* send the computed range back to the tag */
+        // send the computed range back to the tag 
         memset(s_data, 0, sizeof(s_data));
         s_data[DW1000_OFF_TYPE] = DW1000_MSG_RANGE_REPORT;
         memcpy(s_data + DW1000_OFF_T1, &range, sizeof(range));
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_CAL_SET) {
-        /* calibration: the tag asks us to apply a new shared antenna delay */
+        // calibration: the tag asks us to apply a new shared antenna delay 
         uint8_t  session = s_data[DW1000_OFF_CAL_SESSION];
         uint16_t new_ad  = (uint16_t)(s_data[DW1000_OFF_CAL_AD] |
                                       ((uint16_t)s_data[DW1000_OFF_CAL_AD + 1] << 8));
@@ -767,11 +783,11 @@ static void anchor_on_received(void)
         ESP_LOGI(TAG, "ANCHOR: CAL_SET session=%u - applying antenna_delay=%u",
                  (unsigned)session, (unsigned)new_ad);
         dw1000_set_antenna_delay(new_ad);
-        dw1000_commit_config();   /* writes TX_ANTD + LDE_RXANTD */
+        dw1000_commit_config();   // writes TX_ANTD + LDE_RXANTD 
         ESP_LOGI(TAG, "ANCHOR: antenna_delay=%u applied (TX_ANTD + LDE_RXANTD)",
                  (unsigned)new_ad);
 
-        /* acknowledge so the tag can continue to the next iteration */
+        // acknowledge so the tag can continue to the next iteration 
         memset(s_data, 0, sizeof(s_data));
         s_data[DW1000_OFF_TYPE]        = DW1000_MSG_CAL_ACK;
         s_data[DW1000_OFF_CAL_SESSION] = session;
@@ -780,13 +796,14 @@ static void anchor_on_received(void)
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     }
-}
+}*/
 
 void dw1000_run_anchor(int irq_gpio)
 {
     dw1000_irq_start(irq_gpio);
     dw1000_receive_permanently(true);
-    dw1000_on_received(anchor_on_received);
+    // dw1000_on_received(my_dw1000_on_received);
+    // dw1000_on_received(anchor_on_received);
     dw1000_start_receive();
 
     for (;;) {
@@ -794,21 +811,211 @@ void dw1000_run_anchor(int irq_gpio)
     }
 }
 
+/* ---------------- Ping ---------------- */
+
+bool dw1000_ping(int irq_gpio, int timeout_ms)
+{
+    bool ok;
+
+    if (!s_tag_init_done) {
+        s_tag_init_done = true;
+        dw1000_irq_start(irq_gpio);
+        dw1000_receive_permanently(true);
+        // dw1000_on_received(my_dw1000_on_received);
+    }
+
+    // start one exchange 
+    s_result_ready = false;
+    memset(s_data, 0, sizeof(s_data));
+    s_data[DW1000_OFF_TYPE] = DW1000_MSG_PING;
+    build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+    s_last_sent_type = DW1000_MSG_PING;
+    dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+
+    ESP_LOGI("DW1000", "Trying to Ping!");
+
+    // wait for the result or the timeout 
+    TickType_t t0 = xTaskGetTickCount();
+    while (!s_result_ready &&
+           (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    ok = s_result_ready;
+    return ok;
+}
+
+/* ---------------- Type to String ---------------- */
+static const char *dw1000_msg_type_to_string(uint8_t type)
+{
+    switch (type) {
+        case DW1000_MSG_POLL:         return "POLL";
+        case DW1000_MSG_POLL_ACK:     return "POLL_ACK";
+        case DW1000_MSG_RANGE:        return "RANGE";
+        case DW1000_MSG_RANGE_REPORT: return "RANGE_REPORT";
+        case DW1000_MSG_CAL_SET:      return "CAL_SET";
+        case DW1000_MSG_CAL_ACK:      return "CAL_ACK";
+        case DW1000_MSG_PING:         return "PING";
+        case DW1000_MSG_PING_ACK:     return "PING_ACK";
+        default:                      return "UNKNOWN";
+    }
+}
+
+/* ---------------- dw1000 on received --------------------- */
+static void my_dw1000_on_received(void)
+{
+    ESP_LOGI("DW1000", "my_dw1000_on_received");
+    uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
+    // ESP_LOGI("DW1000", "is_length_ok");
+    if (len < DW1000_HDR_LEN + 1) {
+        ESP_LOGW(TAG, "ANCHOR RX: short frame len=%u", (unsigned)len);
+        dw1000_start_receive();   // re-arm: we dropped this frame 
+        return;
+    }
+    // ESP_LOGI("DW1000", "is_peer");
+    if (!is_peer(s_data)) {
+        uint8_t *e = s_data + DW1000_OFF_SRC_EUI;
+        ESP_LOGW(TAG, "ANCHOR RX: dropped (not peer) type=%u src=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)s_data[DW1000_OFF_TYPE],
+                 (unsigned)e[7], (unsigned)e[6], (unsigned)e[5], (unsigned)e[4],
+                 (unsigned)e[3], (unsigned)e[2], (unsigned)e[1], (unsigned)e[0]);
+        dw1000_start_receive();   // re-arm: we dropped this frame 
+        return;
+    }
+    // ESP_LOGI("DW1000", "is_addressed_to_me");
+    if (!is_addressed_to_me(s_data)) {
+        uint8_t *d = s_data + DW1000_OFF_DST_EUI;
+        ESP_LOGW(TAG, "ANCHOR RX: dropped (not for me) type=%u dst=%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+                 (unsigned)s_data[DW1000_OFF_TYPE],
+                 (unsigned)d[7], (unsigned)d[6], (unsigned)d[5], (unsigned)d[4],
+                 (unsigned)d[3], (unsigned)d[2], (unsigned)d[1], (unsigned)d[0]);
+        dw1000_start_receive();   // re-arm: we dropped this frame 
+        return;
+    }
+    ESP_LOGI(TAG, "RX: peer frame type=<%s> len=%u",
+             dw1000_msg_type_to_string((s_data[DW1000_OFF_TYPE])), (unsigned)len);    
+
+     if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL) {
+        // reply after REPLY_DELAY_US; the actual reply time is measured 
+        s_t2 = dw1000_get_rx_timestamp();
+        uint64_t now = dw1000_get_system_timestamp();
+        uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
+        // + antenna delay: the TX timestamp must be antenna-referenced (like TX_TIME) 
+        s_t3 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
+
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_POLL_ACK;
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
+     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL_ACK) {
+        // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
+        uint64_t t4 = dw1000_get_rx_timestamp();
+        uint64_t now = dw1000_get_system_timestamp();
+        uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
+        // + antenna delay: TX times must be antenna-referenced (like setDelay/TX_TIME) 
+        uint64_t t5 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
+
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_RANGE;
+        put_ts(s_data + DW1000_OFF_T1, s_t1);
+        put_ts(s_data + DW1000_OFF_T4, t4);
+        put_ts(s_data + DW1000_OFF_T5, t5);
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        s_last_sent_type = DW1000_MSG_RANGE;
+        dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE) {
+        // we have T2/T3; RANGE carries T1/T4/T5; measure T6 now 
+        uint64_t t1 = get_ts(s_data + DW1000_OFF_T1);
+        uint64_t t4 = get_ts(s_data + DW1000_OFF_T4);
+        uint64_t t5 = get_ts(s_data + DW1000_OFF_T5);
+        uint64_t t6 = dw1000_get_rx_timestamp();
+
+        // asymmetric DS-TWR (arduino-dw1000 computeRangeAsymmetric) 
+        int64_t round1 = diff_ts(t4, t1);      // tag:   poll -> ack rx 
+        int64_t reply1 = diff_ts(s_t3, s_t2);  // anchor: poll rx -> ack tx 
+        int64_t round2 = diff_ts(t6, s_t3);    // anchor: ack tx -> range rx 
+        int64_t reply2 = diff_ts(t5, t4);      // tag:   ack rx -> range tx 
+        int64_t num = round1 * round2 - reply1 * reply2;
+        int64_t den = round1 + round2 + reply1 + reply2;
+        int64_t tof = (den != 0) ? (num / den) : 0;
+        float range = (float)tof * DW1000_METERS_PER_TICK;
+        s_last_distance = range;   // remember so calibration can use it 
+
+        ESP_LOGI(TAG, "RANGE OK: %.2f m", (double)range);
+
+        // send the computed range back to the tag 
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_RANGE_REPORT;
+        memcpy(s_data + DW1000_OFF_T1, &range, sizeof(range));
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE_REPORT) {
+        memcpy(&s_last_distance, s_data + DW1000_OFF_T1, sizeof(s_last_distance));
+        s_result_ready = true;
+        dw1000_start_receive();   // re-arm for the next exchange 
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_CAL_SET) {
+        // calibration: the tag asks us to apply a new shared antenna delay 
+        uint8_t  session = s_data[DW1000_OFF_CAL_SESSION];
+        uint16_t new_ad  = (uint16_t)(s_data[DW1000_OFF_CAL_AD] |
+                                      ((uint16_t)s_data[DW1000_OFF_CAL_AD + 1] << 8));
+
+        ESP_LOGI(TAG, "ANCHOR: CAL_SET session=%u - applying antenna_delay=%u",
+                 (unsigned)session, (unsigned)new_ad);
+        dw1000_set_antenna_delay(new_ad);
+        dw1000_commit_config();   // writes TX_ANTD + LDE_RXANTD 
+        ESP_LOGI(TAG, "ANCHOR: antenna_delay=%u applied (TX_ANTD + LDE_RXANTD)",
+                 (unsigned)new_ad);
+
+        // acknowledge so the tag can continue to the next iteration 
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE]        = DW1000_MSG_CAL_ACK;
+        s_data[DW1000_OFF_CAL_SESSION] = session;
+        s_data[DW1000_OFF_CAL_AD]      = new_ad & 0xFF;
+        s_data[DW1000_OFF_CAL_AD + 1]  = (uint8_t)(new_ad >> 8);
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_CAL_ACK) {
+        // the anchor applied the antenna delay we asked for 
+        s_cal_ack_ad = (uint16_t)(s_data[DW1000_OFF_CAL_AD] |
+                                  ((uint16_t)s_data[DW1000_OFF_CAL_AD + 1] << 8));
+        s_cal_ack_received = true;
+        ESP_LOGI(TAG, "TAG RX: CAL_ACK session=%u antenna_delay=%u",
+                 (unsigned)s_data[DW1000_OFF_CAL_SESSION], (unsigned)s_cal_ack_ad);
+        dw1000_start_receive();   // re-arm for the next exchange 
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_PING) {
+        // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
+        ESP_LOGI("DW1000", "Ping");
+        // send the computed range back to the tag 
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_PING_ACK;
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_PING_ACK) {
+        // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
+        ESP_LOGI("DW1000", "Ping ACK");
+        s_result_ready = true;
+    } 
+
+    ESP_LOGI("DW1000", "Receiver Counter: %d", rx_counter);
+    ESP_LOGI("DW1000", "------------------------------");
+    rx_counter++;
+}
+
 void dw1000_set_peer_eui(const uint8_t peer_mac[6])
 {
     int i;
-    /* caller passes the peer's 6-byte ESP32 BLE MAC (peer_mac[0] = MSB). Pad
-       to the 8-byte extended address with two leading zero bytes and store
-       LSB-first (register / header order). */
+    // caller passes the peer's 6-byte ESP32 BLE MAC (peer_mac[0] = MSB). Pad
+    //   to the 8-byte extended address with two leading zero bytes and store
+    //   LSB-first (register / header order). 
     for (i = 0; i < 6; i++) {
         s_peer_eui[i] = peer_mac[5 - i];
     }
     s_peer_eui[6] = 0x00;
     s_peer_eui[7] = 0x00;
     s_peer_set = true;
-    /* Pairing is done in software (is_peer()): keep the hardware frame filter
-       OFF so any valid PHY frame is received and we decide here by source EUI.
-       This avoids depending on the DW1000's address-match hardware. */
+    // Pairing is done in software (is_peer()): keep the hardware frame filter
+    //   OFF so any valid PHY frame is received and we decide here by source EUI.
+    //   This avoids depending on the DW1000's address-match hardware. 
     dw1000_ll_apply_frame_filter(0, 0);
     ESP_LOGI(TAG, "Paired with peer BLE MAC %02X:%02X:%02X:%02X:%02X:%02X",
              (unsigned)peer_mac[0], (unsigned)peer_mac[1], (unsigned)peer_mac[2],
@@ -848,8 +1055,8 @@ static uint16_t dw1000_compute_ideal_antenna_delay(float known_distance_cm)
         return old_ad;
     }
 
-    /* +1 tick of antenna delay shifts the measured range by -METERS_PER_TICK,
-       so the correction (in ticks) is the measured error scaled to ticks. */
+    // +1 tick of antenna delay shifts the measured range by -METERS_PER_TICK,
+    //  so the correction (in ticks) is the measured error scaled to ticks. 
     corr = (int32_t)((meas_m - true_m) * (1.0f / DW1000_METERS_PER_TICK));
     new_ad = (int32_t)old_ad + corr;
     if (new_ad < 0) {
@@ -875,8 +1082,8 @@ uint16_t dw1000_calibrate_antenna_delay(float known_distance_cm)
     return new_ad;
 }
 
-/* Tag side: tell the anchor to apply `new_ad` and wait for its CAL_ACK.
-   Returns true when the anchor confirmed (and applied the same value). */
+// Tag side: tell the anchor to apply `new_ad` and wait for its CAL_ACK.
+// Returns true when the anchor confirmed (and applied the same value).
 static bool dw1000_send_cal_set_and_wait(uint16_t new_ad, uint16_t timeout_ms)
 {
     uint8_t session = ++s_cal_session;

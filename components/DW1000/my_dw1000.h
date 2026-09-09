@@ -253,12 +253,15 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v);
 #define DW1000_MSG_RANGE_REPORT 3   /* anchor -> tag: computed distance (float) */
 #define DW1000_MSG_CAL_SET      4   /* tag -> anchor: apply this antenna delay  */
 #define DW1000_MSG_CAL_ACK      5   /* anchor -> tag: new antenna delay applied */
+#define DW1000_MSG_PING         6   /* send a ping */
+#define DW1000_MSG_PING_ACK     7   /* ack for ping */
+
 
 #define DW1000_LEN_DATA         16     /* payload length of a ranging frame;
                                            the full frame adds a 21-byte IEEE
                                            802.15.4 extended-address header    */
 #define DW1000_REPLY_DELAY_US   3000u  /* nominal reply delay (measured anyway) */
-#define DW1000_RANGE_TIMEOUT_MS 1000   /* tag: max wait for a result, ms        */
+#define DW1000_RANGE_TIMEOUT_MS 2000   /* tag: max wait for a result, ms        */
 
 /* Joint antenna-delay calibration defaults (dw1000_calibrate_antenna_delay_iterative). */
 #define DW1000_CAL_CONVERGENCE_TICKS 5    /* stop when |calc_ad - current_ad| < this */
@@ -306,6 +309,10 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
  */
 void dw1000_run_anchor(int irq_gpio);
 
+/*
+ * ping.
+ */
+bool dw1000_ping(int irq_gpio, int timeout_ms);
 /*
  * Antenna-delay calibration. Put the two modules at a known distance (line
  * of sight), let at least one ranging exchange complete, then call this with
