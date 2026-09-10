@@ -75,26 +75,16 @@ static void dw1000_radio_task(void *arg)
                  (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
     }
 
-    /* 1. init SPI bus + reset + LDE microcode load */
-    dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST);
-
-    /* 2. verify the module is reachable */
-    if (!dw1000_probe()) {
-        ESP_LOGE("DW1000", "Module not detected - check wiring/power!");
-        while (1) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-    }
-
-    /* 3. configure the radio (own EUI is derived from this board's BLE MAC) */
-    dw1000_config(MY_PAN_ID, MY_SHORT_ADDR,
+    /* init SPI bus + reset + LDE microcode load */
+    dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST,
+                 MY_PAN_ID, MY_SHORT_ADDR,
                   DW1000_MODE_SHORTDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, antenna_delay);
 
-    /* 4. pair with the anchor */
+    /* pair with the anchor */
     dw1000_set_peer_eui(peer_eui);
 
-    /* 5a. optional joint antenna-delay calibration */
+    /* optional joint antenna-delay calibration */
     // if (CALIBRATE_DISTANCE_CM > 0) {
     //     ESP_LOGI("DW1000", "Joint calibration: known distance %d cm",
     //              (int)CALIBRATE_DISTANCE_CM);
@@ -110,7 +100,7 @@ static void dw1000_radio_task(void *arg)
 
     int ping_counter = 0;
 
-    /* 5b. continuous DS-TWR ranging */
+    /* continuous DS-TWR ranging */
     while (1) {
         // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
 

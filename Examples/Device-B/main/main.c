@@ -59,28 +59,23 @@ static void dw1000_radio_task(void *arg)
                  (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
     }
 
-    /* 1. init SPI bus + reset + LDE microcode load */
-    dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST);
-
-    /* 2. verify the module is reachable */
-    if (!dw1000_probe()) {
-        ESP_LOGE("DW1000", "Module not detected - check wiring/power!");
-        while (1) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-    }
-
-    /* 3. configure the radio (own EUI is derived from this board's BLE MAC) */
-    dw1000_config(MY_PAN_ID, MY_SHORT_ADDR,
+    /* Init SPI bus + reset + LDE microcode load */
+    dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST,
+                 MY_PAN_ID, MY_SHORT_ADDR,
                   DW1000_MODE_SHORTDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, antenna_delay);
 
-    /* 4. pair with the tag */
+    /* pair with the tag */
     dw1000_set_peer_eui(peer_eui);
 
-    /* 5. answer ranging + calibration requests forever */
-    dw1000_run_anchor(PIN_IRQ);
+    /* answer ranging + calibration requests forever */
+    // dw1000_run_anchor(PIN_IRQ);
 
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // ----- Run Anchor ------
     // int ping_counter = 0;
 
     // while(1){

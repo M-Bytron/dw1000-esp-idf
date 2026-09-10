@@ -52,14 +52,19 @@ const uint8_t DW1000_MODE_LONGDATA_RANGE_ACCURACY[3] =
 void dw1000_on_received(dw1000_handler_t cb);
 static void my_dw1000_on_received(void);
 
-void dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
-                 uint8_t cs, uint8_t irq, uint8_t rst)
+bool dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
+                 uint8_t cs, uint8_t irq, uint8_t rst,  
+                 uint16_t network_id,
+                 uint16_t device_address,
+                 const uint8_t mode[3],
+                 uint8_t channel,
+                 uint16_t antenna_delay)
 {
     (void)irq; /* interrupt handling is ported in a later step */
 
     if (dw1000_ll_spi_init(sck, miso, mosi, cs) != ESP_OK) {
         ESP_LOGE(TAG, "SPI init failed - aborting");
-        return;
+        return false;
     }
 
     /* Power-up / reset sequence (DW1000 User Manual 5.6). */
@@ -70,16 +75,25 @@ void dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
     dw1000_ll_init_defaults();
     dw1000_ll_manage_lde();   
 
-    ESP_LOGW(TAG, "dw1000_irq_start(irq)");
+    if (!dw1000_probe()) {
+        ESP_LOGE("DW1000", "Module not detected - check wiring/power!");
+        return false;
+    }
+
+    dw1000_config(network_id, device_address, mode, channel, antenna_delay);
+
+    ESP_LOGI(TAG, "ISR assigned");
     dw1000_irq_start(irq);
 
-    // ESP_LOGW(TAG, "dw1000_receive_permanently");
-    // dw1000_receive_permanently(true);
+    ESP_LOGI(TAG, "Receiving Enabled");
+    dw1000_receive_permanently(true);
+    dw1000_start_receive(); 
 
-    ESP_LOGW(TAG, "Register DW1000 Callback");
+    ESP_LOGI(TAG, "Register DW1000 Callback Registered");
     dw1000_on_received(my_dw1000_on_received);
 
     ESP_LOGI(TAG, "Driver initialized (pure C). Probing the DW1000 ...");
+    return true;
 }
 
 bool dw1000_probe(void)
@@ -802,7 +816,7 @@ void dw1000_run_anchor(int irq_gpio)
 {
     dw1000_irq_start(irq_gpio);
     dw1000_receive_permanently(true);
-    // dw1000_on_received(my_dw1000_on_received);
+    dw1000_on_received(my_dw1000_on_received);
     // dw1000_on_received(anchor_on_received);
     dw1000_start_receive();
 
@@ -816,13 +830,6 @@ void dw1000_run_anchor(int irq_gpio)
 bool dw1000_ping(int irq_gpio, int timeout_ms)
 {
     bool ok;
-
-    if (!s_tag_init_done) {
-        s_tag_init_done = true;
-        dw1000_irq_start(irq_gpio);
-        dw1000_receive_permanently(true);
-        // dw1000_on_received(my_dw1000_on_received);
-    }
 
     // start one exchange 
     s_result_ready = false;
@@ -907,7 +914,7 @@ static void my_dw1000_on_received(void)
         s_data[DW1000_OFF_TYPE] = DW1000_MSG_POLL_ACK;
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
-     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL_ACK) {
+    } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL_ACK) {
         // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
         uint64_t t4 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
