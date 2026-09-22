@@ -59,19 +59,19 @@ esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs
         }
     }
 
-    spi_bus_config_t buscfg = {
-        .sclk_io_num       = sck,
-        .mosi_io_num       = mosi,
-        .miso_io_num       = miso,
-        .quadwp_io_num     = -1,
-        .quadhd_io_num     = -1,
-        .max_transfer_sz   = 1024,
-    };
-    ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    // spi_bus_config_t buscfg = {
+    //     .sclk_io_num       = sck,
+    //     .mosi_io_num       = mosi,
+    //     .miso_io_num       = miso,
+    //     .quadwp_io_num     = -1,
+    //     .quadhd_io_num     = -1,
+    //     .max_transfer_sz   = 1024,
+    // };
+    // ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    // if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    //     ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
+    //     return ret;
+    // }
 
     spi_device_interface_config_t devcfg = {
         .mode            = 2,                  /* CPOL=0, CPHA=0, MSB first */

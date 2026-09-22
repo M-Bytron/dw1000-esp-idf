@@ -28,6 +28,8 @@
 
 #include "my_dw1000.h"
 #include "lora.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 /* ------------------------- wiring ------------------------- */
 // const uint8_t PIN_SCK  = 25;
 // const uint8_t PIN_MISO = 26;
@@ -79,15 +81,15 @@ static void dw1000_radio_task(void *arg)
                  (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
     }
     
-    // spi_bus_config_t bus = {
-    //     .mosi_io_num = PIN_MOSI,
-    //     .miso_io_num = PIN_MISO,
-    //     .sclk_io_num = PIN_SCK,
-    //     .quadwp_io_num = -1,
-    //     .quadhd_io_num = -1,
-    //     .max_transfer_sz = 0,
-    // };
-    // ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
+    spi_bus_config_t bus = {
+        .mosi_io_num = PIN_MOSI,
+        .miso_io_num = PIN_MISO,
+        .sclk_io_num = PIN_SCK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 0,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
 
     // esp_err_t ret;
 
@@ -138,5 +140,28 @@ static void dw1000_radio_task(void *arg)
 
 void app_main(void)
 {
+
+
+    // // -----------------------------------------------
+    // // ----- Initialize NVS --------------------------
+    // if (!nvs_init()) {
+    //     ESP_LOGE("TAG", "Failed to initialize NVS, restarting...");
+    //     esp_restart();
+    // }
+
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW("TAG", "NVS partition corrupted, erasing...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE("TAG", "Failed to initialize NVS: %s", esp_err_to_name(err));
+    }
+
+    ESP_LOGI("TAG", "NVS initialized successfully");
+
     xTaskCreate(dw1000_radio_task, "dw1000_radio", 8192, NULL, 5, NULL);
 }

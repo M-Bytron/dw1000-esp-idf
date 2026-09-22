@@ -207,15 +207,15 @@ static void radio_force_rx(void)
 /*----------------------------------------------*/
 static void spi_init(spi_device_handle_t *handle, uint8_t ss_pin, uint8_t mosi_pin, uint8_t miso_pin, uint8_t sck_pin)
 {
-    spi_bus_config_t bus = {
-        .mosi_io_num = mosi_pin,
-        .miso_io_num = miso_pin,
-        .sclk_io_num = sck_pin,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 0,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
+//     spi_bus_config_t bus = {
+//         .mosi_io_num = mosi_pin,
+//         .miso_io_num = miso_pin,
+//         .sclk_io_num = sck_pin,
+//         .quadwp_io_num = -1,
+//         .quadhd_io_num = -1,
+//         .max_transfer_sz = 0,
+//     };
+    // ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
 
     spi_device_interface_config_t dev = {
         .clock_speed_hz = 4E6,
