@@ -31,6 +31,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 /* ------------------------- wiring ------------------------- */
+// ----- for ESP32
 // const uint8_t PIN_SCK  = 25;
 // const uint8_t PIN_MISO = 26;
 // const uint8_t PIN_MOSI = 27;
@@ -38,12 +39,15 @@
 // const uint8_t PIN_IRQ  = 13;
 // const uint8_t PIN_RST  = 32;
 
+// ----- for ESP32S3
 const uint8_t PIN_SCK  = 12;
 const uint8_t PIN_MISO = 13;
 const uint8_t PIN_MOSI = 11;
+
 const uint8_t PIN_CS   = 10;
 const uint8_t PIN_IRQ  = 14;
 const uint8_t PIN_RST  = 9;
+
 const uint8_t LORA_SS  = 46;
 const uint8_t LORA_RST  = 3;
 
@@ -53,8 +57,6 @@ const uint8_t LORA_RST  = 3;
 // const uint8_t PIN_CS   = 5;
 // const uint8_t PIN_IRQ  = 9;
 // const uint8_t PIN_RST  = 4;
-
-
 
 /* ------------------- shared radio settings -------------------
    The PAN, channel and mode MUST match on both boards. */
@@ -87,24 +89,11 @@ static void dw1000_radio_task(void *arg)
         .sclk_io_num = PIN_SCK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 0,
+        .max_transfer_sz = 0, // LORA
+        // .max_transfer_sz   = 1024,   //DW1000
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
 
-    // esp_err_t ret;
-
-    // spi_bus_config_t buscfg = {
-    //     .sclk_io_num       = PIN_SCK,
-    //     .mosi_io_num       = PIN_MOSI,
-    //     .miso_io_num       = PIN_MISO,
-    //     .quadwp_io_num     = -1,
-    //     .quadhd_io_num     = -1,
-    //     .max_transfer_sz   = 1024,
-    // };
-    // ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    // if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-    //     ESP_LOGE("TAG", "spi_bus_initialize failed: %s", esp_err_to_name(ret));
-    // }
 
     lora_init(LORA_SS,LORA_RST,PIN_MOSI,PIN_MISO,PIN_SCK);
     /* Init SPI bus + reset + LDE microcode load */
@@ -116,38 +105,14 @@ static void dw1000_radio_task(void *arg)
     /* pair with the tag */
     dw1000_set_peer_eui(peer_eui);
 
-        // lora_init(46,3,6,PIN_MISO,7);
-
-    /* answer ranging + calibration requests forever */
-    // dw1000_run_anchor(PIN_IRQ);
-
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    // ----- Run Anchor ------
-    // int ping_counter = 0;
-
-    // while(1){
-    //     bool ok = dw1000_ping(PIN_IRQ, 100);
-    //     ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
-    //     ping_counter++;
-    //     if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
-    //     else ESP_LOGW("MAIN", "NO Ping");
-    //     vTaskDelay(pdMS_TO_TICKS(500));
-    // }
 }
 
 void app_main(void)
 {
-
-
-    // // -----------------------------------------------
-    // // ----- Initialize NVS --------------------------
-    // if (!nvs_init()) {
-    //     ESP_LOGE("TAG", "Failed to initialize NVS, restarting...");
-    //     esp_restart();
-    // }
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
