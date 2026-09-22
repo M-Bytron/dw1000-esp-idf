@@ -150,7 +150,7 @@ bool dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
     }
     xTaskCreate(dw1000_rx_task, "dw1000_rx", 4096, NULL, 12, &s_rx_task_h);
     xTaskCreate(dw1000_tx_task, "dw1000_tx", 4096, NULL, 10, &s_tx_task_h);
-    xTaskCreate(dw1000_stats_task, "dw1000_txs", 3072, NULL, 1, NULL);
+    // xTaskCreate(dw1000_stats_task, "dw1000_txs", 3072, NULL, 1, NULL);
     ESP_LOGI(TAG, "TX/RX tasks started (tx=10, rx=12)");
 
     ESP_LOGI(TAG, "Register DW1000 Callback Registered");

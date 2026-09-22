@@ -59,19 +59,19 @@ esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs
         }
     }
 
-    // spi_bus_config_t buscfg = {
-    //     .sclk_io_num       = sck,
-    //     .mosi_io_num       = mosi,
-    //     .miso_io_num       = miso,
-    //     .quadwp_io_num     = -1,
-    //     .quadhd_io_num     = -1,
-    //     .max_transfer_sz   = 1024,
-    // };
-    // ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    // if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-    //     ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
-    //     return ret;
-    // }
+    spi_bus_config_t buscfg = {
+        .sclk_io_num       = sck,
+        .mosi_io_num       = mosi,
+        .miso_io_num       = miso,
+        .quadwp_io_num     = -1,
+        .quadhd_io_num     = -1,
+        .max_transfer_sz   = 1024,
+    };
+    ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     spi_device_interface_config_t devcfg = {
         .mode            = 2,                  /* CPOL=0, CPHA=0, MSB first */
@@ -80,6 +80,7 @@ esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs
         .queue_size      = 4,
         .cs_ena_posttrans = 10,                /* CS hold time (SPI clocks) */
     };
+
     ret = spi_bus_add_device(SPI2_HOST, &devcfg, &s_spi);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "spi_bus_add_device failed: %s", esp_err_to_name(ret));
@@ -1742,10 +1743,10 @@ esp_err_t dw1000_ll_irq_start(uint8_t irq_gpio)
             return ESP_ERR_NO_MEM;
         }
     }
-    if (s_diag_task == NULL) {
-        /* lowest priority: it can never delay the IRQ task or the radio */
-        xTaskCreate(dw1000_ll_diag_task, "dw1000_diag", 2560, NULL, 1, &s_diag_task);
-    }
+    // if (s_diag_task == NULL) {
+    //     /* lowest priority: it can never delay the IRQ task or the radio */
+    //     xTaskCreate(dw1000_ll_diag_task, "dw1000_diag", 2560, NULL, 1, &s_diag_task);
+    // }
 
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << irq_gpio),
