@@ -993,7 +993,7 @@ static const char *dw1000_msg_type_to_string(uint8_t type)
 static void my_dw1000_on_received(void)
 {
     dw1000_rx_job_t job;
-    ESP_LOGI(TAG, "received somthing............");
+    // ESP_LOGI(TAG, "received somthing............");
 
     memset(&job, 0, sizeof(job));
     job.rx_ts = dw1000_ll_get_receive_timestamp();   /* read before anything else */
@@ -1189,28 +1189,28 @@ static void dw1000_tx_task(void *arg)
 
         dw1000_ll_radio_lock();
 
-        // if (job.scheduled) {
-        //     uint64_t now = dw1000_ll_get_system_timestamp();
-        //     if (now > job.target_ticks) {
-        //         s_tx_late++;
-        //         ESP_LOGW(TAG, "TX: scheduled time already passed by %llu ticks (late=%u)",
-        //                  (unsigned long long)(now - job.target_ticks),
-        //                  (unsigned)s_tx_late);
-        //     }
-        // }
+        if (job.scheduled) {
+            uint64_t now = dw1000_ll_get_system_timestamp();
+            if (now > job.target_ticks) {
+                s_tx_late++;
+                ESP_LOGW(TAG, "TX: scheduled time already passed by %llu ticks (late=%u)",
+                         (unsigned long long)(now - job.target_ticks),
+                         (unsigned)s_tx_late);
+            }
+        }
 
         dw1000_ll_set_data(job.data, job.len);
         dw1000_ll_new_transmit();          /* idle + clear TX status + mode = TX */
         dw1000_ll_tx_done_clear();
 
-        // if (job.scheduled) {
-        //     dw1000_ll_start_transmit_at(job.target_ticks);
-        // } else if (job.delay_us != 0) {
-        //     dw1000_ll_set_delay(job.delay_us);
-        //     dw1000_ll_start_transmit();
-        // } else {
+        if (job.scheduled) {
+            dw1000_ll_start_transmit_at(job.target_ticks);
+        } else if (job.delay_us != 0) {
+            dw1000_ll_set_delay(job.delay_us);
             dw1000_ll_start_transmit();
-        // }
+        } else {
+            dw1000_ll_start_transmit();
+        }
 
         dw1000_ll_radio_unlock();
 
@@ -1223,7 +1223,7 @@ static void dw1000_tx_task(void *arg)
                      DW1000_TX_DONE_TIMEOUT_MS, (unsigned)job.len,
                      (unsigned)s_tx_timeout);
         }
-        ESP_LOGI(TAG, "sent successfull...................");
+        // ESP_LOGI(TAG, "sent successfull...................");
 
         /* Back to RX - the TX task is the only place this happens. */
         dw1000_ll_radio_lock();
