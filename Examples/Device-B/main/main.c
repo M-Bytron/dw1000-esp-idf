@@ -27,14 +27,32 @@
 #include "freertos/task.h"
 
 #include "my_dw1000.h"
-
+#include "lora.h"
 /* ------------------------- wiring ------------------------- */
-const uint8_t PIN_SCK  = 25;
-const uint8_t PIN_MISO = 26;
-const uint8_t PIN_MOSI = 27;
-const uint8_t PIN_CS   = 14;
-const uint8_t PIN_IRQ  = 13;
-const uint8_t PIN_RST  = 32;
+// const uint8_t PIN_SCK  = 25;
+// const uint8_t PIN_MISO = 26;
+// const uint8_t PIN_MOSI = 27;
+// const uint8_t PIN_CS   = 14;
+// const uint8_t PIN_IRQ  = 13;
+// const uint8_t PIN_RST  = 32;
+
+// const uint8_t PIN_SCK  = 12;
+// const uint8_t PIN_MISO = 13;
+// const uint8_t PIN_MOSI = 11;
+// const uint8_t PIN_CS   = 10;
+// const uint8_t PIN_IRQ  = 14;
+// const uint8_t PIN_RST  = 9;
+const uint8_t LORA_SS  = 46;
+const uint8_t LORA_RST  = 3;
+
+const uint8_t PIN_SCK  = 7;
+const uint8_t PIN_MISO = 8;
+const uint8_t PIN_MOSI = 6;
+const uint8_t PIN_CS   = 5;
+const uint8_t PIN_IRQ  = 9;
+const uint8_t PIN_RST  = 4;
+
+
 
 /* ------------------- shared radio settings -------------------
    The PAN, channel and mode MUST match on both boards. */
@@ -45,7 +63,9 @@ uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
    printed at boot as "My BLE MAC: ..."). Device B uses Device A's MAC. */
-static const uint8_t peer_eui[6] = {0x28, 0x05, 0xA5, 0x2A, 0x66, 0xCC};
+static const uint8_t peer_eui[6] = {0x28, 0x05, 0xA5, 0x2A, 0x66, 0xCE};
+
+#include "driver/spi_master.h"
 
 /* -------------------------- task --------------------------- */
 static void dw1000_radio_task(void *arg)
@@ -58,15 +78,43 @@ static void dw1000_radio_task(void *arg)
                  (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2],
                  (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
     }
+    
+    // spi_bus_config_t bus = {
+    //     .mosi_io_num = PIN_MOSI,
+    //     .miso_io_num = PIN_MISO,
+    //     .sclk_io_num = PIN_SCK,
+    //     .quadwp_io_num = -1,
+    //     .quadhd_io_num = -1,
+    //     .max_transfer_sz = 0,
+    // };
+    // ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
 
+    // esp_err_t ret;
+
+    // spi_bus_config_t buscfg = {
+    //     .sclk_io_num       = PIN_SCK,
+    //     .mosi_io_num       = PIN_MOSI,
+    //     .miso_io_num       = PIN_MISO,
+    //     .quadwp_io_num     = -1,
+    //     .quadhd_io_num     = -1,
+    //     .max_transfer_sz   = 1024,
+    // };
+    // ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    // if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    //     ESP_LOGE("TAG", "spi_bus_initialize failed: %s", esp_err_to_name(ret));
+    // }
+
+    // lora_init(LORA_SS,LORA_RST,PIN_MOSI,PIN_MISO,PIN_SCK);
     /* Init SPI bus + reset + LDE microcode load */
     dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST,
                  MY_PAN_ID, MY_SHORT_ADDR,
-                  DW1000_MODE_SHORTDATA_FAST_ACCURACY,
+                  DW1000_MODE_LONGDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, antenna_delay);
 
     /* pair with the tag */
     dw1000_set_peer_eui(peer_eui);
+
+        // lora_init(46,3,6,PIN_MISO,7);
 
     /* answer ranging + calibration requests forever */
     // dw1000_run_anchor(PIN_IRQ);

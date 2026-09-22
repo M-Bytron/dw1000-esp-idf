@@ -17,6 +17,7 @@
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "DW1000";
 
@@ -31,7 +32,7 @@ static uint8_t  s_own_eui[8];
 static uint8_t  s_peer_eui[8]  = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static bool     s_peer_set     = false;
 uint16_t rx_counter = 0;
-
+uint16_t received_pings= 0;
 /* ============================ mode presets ============================ */
 
 const uint8_t DW1000_MODE_LONGDATA_RANGE_LOWPOWER[3] =
@@ -46,6 +47,55 @@ const uint8_t DW1000_MODE_LONGDATA_FAST_ACCURACY[3] =
     {DW1000_RATE_6800KBPS, DW1000_PRF_64MHZ, DW1000_PREAMBLE_LEN_1024};
 const uint8_t DW1000_MODE_LONGDATA_RANGE_ACCURACY[3] =
     {DW1000_RATE_110KBPS, DW1000_PRF_64MHZ, DW1000_PREAMBLE_LEN_2048};
+
+/* ============================ TX / RX tasks ============================
+ *
+ * Stage 1 architecture: all transmissions are queued and performed by a single
+ * TX task, which is also the only place that changes the radio between RX and
+ * TX. Received frames are captured in the IRQ task (length + timestamp +
+ * bytes) and processed by a separate RX task that enqueues any reply.
+ *
+ *   IRQ task  : status handling + RX capture      -> rx_queue
+ *   RX  task  : protocol logic, builds replies    -> tx_queue
+ *   TX  task  : owns TX/RX mode, transmits frames -> radio
+ */
+#define DW1000_TX_QUEUE_LEN       8
+#define DW1000_RX_QUEUE_LEN       8
+#define DW1000_MAX_FRAME_LEN      64
+#define DW1000_TX_DONE_TIMEOUT_MS 20
+/* DW1000_REPLY_DELAY_US is defined in my_dw1000.h */
+
+typedef struct {
+    uint16_t len;
+    bool     scheduled;      /* true: use target_ticks (absolute time) */
+    uint16_t reserved;
+    uint32_t delay_us;       /* relative TX delay, 0 = immediate */
+    uint64_t target_ticks;   /* absolute TX time when scheduled */
+    uint8_t  data[DW1000_MAX_FRAME_LEN];
+} dw1000_tx_job_t;
+
+typedef struct {
+    uint16_t len;
+    uint16_t reserved;
+    uint64_t rx_ts;          /* RX timestamp captured in the IRQ task */
+    uint8_t  data[DW1000_MAX_FRAME_LEN];
+} dw1000_rx_job_t;
+
+static QueueHandle_t s_tx_queue = NULL;
+static QueueHandle_t s_rx_queue = NULL;
+static TaskHandle_t  s_tx_task_h = NULL;
+static TaskHandle_t  s_rx_task_h = NULL;
+
+/* TX statistics (written by the TX task, reported on failures) */
+static volatile uint32_t s_tx_sent    = 0;
+static volatile uint32_t s_tx_timeout = 0;
+static volatile uint32_t s_tx_dropped = 0;
+static volatile uint32_t s_tx_late    = 0;
+static volatile uint32_t s_rx_dropped = 0;
+
+static void dw1000_tx_task(void *arg);
+static void dw1000_rx_task(void *arg);
+static void dw1000_stats_task(void *arg);
 
 /* ============================ init / probe ============================ */
 
@@ -82,15 +132,36 @@ bool dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
 
     dw1000_config(network_id, device_address, mode, channel, antenna_delay);
 
+    /* ---- DIAGNOSTIC 3: also interrupt on the LDE-done event ----------------
+       LDEDONE is NOT in the mask by default, so a ping that is received but
+       never decodes produces no interrupt at all and stays invisible. Masking
+       it makes every reception attempt show up as a traceable IRQ run
+       (tag 'L' in the trace / "seen lde=" in the stats line). */
+    dw1000_begin_config();
+    dw1000_interrupt_on_receive_timestamp_available(true);   /* LDEDONE */
+    dw1000_commit_config();
+
+    /* TX/RX worker tasks + queues (see the architecture note at the top). */
+    s_tx_queue = xQueueCreate(DW1000_TX_QUEUE_LEN, sizeof(dw1000_tx_job_t));
+    s_rx_queue = xQueueCreate(DW1000_RX_QUEUE_LEN, sizeof(dw1000_rx_job_t));
+    if (s_tx_queue == NULL || s_rx_queue == NULL) {
+        ESP_LOGE(TAG, "queue creation failed - aborting");
+        return false;
+    }
+    xTaskCreate(dw1000_rx_task, "dw1000_rx", 4096, NULL, 12, &s_rx_task_h);
+    xTaskCreate(dw1000_tx_task, "dw1000_tx", 4096, NULL, 10, &s_tx_task_h);
+    xTaskCreate(dw1000_stats_task, "dw1000_txs", 3072, NULL, 1, NULL);
+    ESP_LOGI(TAG, "TX/RX tasks started (tx=10, rx=12)");
+
+    ESP_LOGI(TAG, "Register DW1000 Callback Registered");
+    dw1000_on_received(my_dw1000_on_received);
+
     ESP_LOGI(TAG, "ISR assigned");
     dw1000_irq_start(irq);
 
     ESP_LOGI(TAG, "Receiving Enabled");
     dw1000_receive_permanently(true);
-    dw1000_start_receive(); 
-
-    ESP_LOGI(TAG, "Register DW1000 Callback Registered");
-    dw1000_on_received(my_dw1000_on_received);
+    dw1000_rearm_receive();
 
     ESP_LOGI(TAG, "Driver initialized (pure C). Probing the DW1000 ...");
     return true;
@@ -268,7 +339,9 @@ void dw1000_begin_config(void)
 
 void dw1000_commit_config(void)
 {
+    dw1000_ll_radio_lock();
     dw1000_ll_commit_configuration();
+    dw1000_ll_radio_unlock();
 }
 
 /* Convenience: begin_config() + commit_config(). */
@@ -292,7 +365,7 @@ void dw1000_config(uint16_t network_id,
     {
         uint8_t mac[6];
         int i;
-        if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        if (esp_read_mac(mac, ESP_MAC_BT) == ESP_OK) {
             for (i = 0; i < 6; i++) {
                 s_own_eui[i] = mac[5 - i];   /* register order: LSB first */
             }
@@ -331,35 +404,78 @@ void dw1000_idle(void)
 
 void dw1000_start_receive(void)
 {
+    dw1000_ll_radio_lock();
     dw1000_ll_new_receive();
     dw1000_ll_start_receive();
+    dw1000_ll_radio_unlock();
+}
+
+/* Put the radio back into RX without touching SYS_STATUS. Preferred over
+   dw1000_start_receive() once running: it cannot wipe a frame that arrived
+   while we were doing something else. */
+void dw1000_rearm_receive(void)
+{
+    dw1000_ll_radio_lock();
+    dw1000_ll_rearm_receive();
+    dw1000_ll_radio_unlock();
 }
 
 void dw1000_receive_permanently(bool enable)
 {
+    dw1000_ll_radio_lock();
     dw1000_ll_receive_permanently(enable ? 1 : 0);
+    dw1000_ll_radio_unlock();
 }
 
-void dw1000_send(const uint8_t *data, uint16_t len)
+/* Queue a frame for the TX task. The bytes are COPIED, so the caller may reuse
+   its buffer immediately. Returns false if the frame was rejected. */
+static bool dw1000_queue_send(const uint8_t *data, uint16_t len,
+                              uint32_t delay_us, uint64_t target_ticks, bool scheduled)
 {
-    dw1000_ll_set_data(data, len);
-    dw1000_ll_new_transmit();
-    dw1000_ll_start_transmit();
+    dw1000_tx_job_t job;
+
+    if (s_tx_queue == NULL) {
+        ESP_LOGW(TAG, "TX: queue not ready - dropped frame (len=%u)", (unsigned)len);
+        return false;
+    }
+    if (len == 0 || len > sizeof(job.data)) {
+        ESP_LOGW(TAG, "TX: bad length %u (max %u)", (unsigned)len,
+                 (unsigned)sizeof(job.data));
+        return false;
+    }
+
+    memset(&job, 0, sizeof(job));
+    job.len          = len;
+    job.delay_us     = delay_us;
+    job.target_ticks = target_ticks;
+    job.scheduled    = scheduled;
+    memcpy(job.data, data, len);
+
+    if (xQueueSend(s_tx_queue, &job, 0) != pdTRUE) {
+        s_tx_dropped++;
+        ESP_LOGW(TAG, "TX: queue full - dropped frame (len=%u, dropped=%u)",
+                 (unsigned)len, (unsigned)s_tx_dropped);
+        return false;
+    }
+    return true;
 }
 
-void dw1000_send_at(const uint8_t *data, uint16_t len, uint32_t delay_us)
+/* Highest-level send: queue a frame for the TX task. Non-blocking. */
+bool dw1000_send(const uint8_t *data, uint16_t len)
 {
-    dw1000_ll_set_data(data, len);
-    dw1000_ll_new_transmit();
-    dw1000_ll_set_delay(delay_us);
-    dw1000_ll_start_transmit();
+    return dw1000_queue_send(data, len, 0, 0, false);
 }
 
-void dw1000_send_at_ticks(const uint8_t *data, uint16_t len, uint64_t target_ticks)
+/* Queue a frame with a relative TX delay (us). */
+bool dw1000_send_at(const uint8_t *data, uint16_t len, uint32_t delay_us)
 {
-    dw1000_ll_set_data(data, len);
-    dw1000_ll_new_transmit();
-    dw1000_ll_start_transmit_at(target_ticks);
+    return dw1000_queue_send(data, len, delay_us, 0, false);
+}
+
+/* Queue a frame to be transmitted at an absolute DW1000 timestamp. */
+bool dw1000_send_at_ticks(const uint8_t *data, uint16_t len, uint64_t target_ticks)
+{
+    return dw1000_queue_send(data, len, 0, target_ticks, true);
 }
 
 /* ============================ data buffer ============================ */
@@ -699,11 +815,12 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
 
     // start one exchange */
     s_result_ready = false;
-    memset(s_data, 0, sizeof(s_data));
-    s_data[DW1000_OFF_TYPE] = DW1000_MSG_POLL;
-    build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+    uint8_t frame[DW1000_HDR_LEN + DW1000_LEN_DATA];
+    memset(frame, 0, sizeof(frame));
+    frame[DW1000_OFF_TYPE] = DW1000_MSG_POLL;
+    build_header(frame, s_pan_id, s_peer_eui, s_own_eui);
     s_last_sent_type = DW1000_MSG_POLL;
-    dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+    dw1000_send(frame, DW1000_HDR_LEN + DW1000_LEN_DATA);
 
     // wait for the result or the timeout */
     TickType_t t0 = xTaskGetTickCount();
@@ -833,11 +950,12 @@ bool dw1000_ping(int irq_gpio, int timeout_ms)
 
     // start one exchange 
     s_result_ready = false;
-    memset(s_data, 0, sizeof(s_data));
-    s_data[DW1000_OFF_TYPE] = DW1000_MSG_PING;
-    build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+    uint8_t frame[DW1000_HDR_LEN + DW1000_LEN_DATA];
+    memset(frame, 0, sizeof(frame));
+    frame[DW1000_OFF_TYPE] = DW1000_MSG_PING;
+    build_header(frame, s_pan_id, s_peer_eui, s_own_eui);
     s_last_sent_type = DW1000_MSG_PING;
-    dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+    dw1000_send(frame, DW1000_HDR_LEN + DW1000_LEN_DATA);
 
     ESP_LOGI("DW1000", "Trying to Ping!");
 
@@ -868,15 +986,38 @@ static const char *dw1000_msg_type_to_string(uint8_t type)
     }
 }
 
-/* ---------------- dw1000 on received --------------------- */
+/* ---------------- RX capture (runs in the IRQ task) ---------------------
+ * Called by the low-level IRQ handler, which already holds the radio lock.
+ * Captures only length, RX timestamp and bytes, then hands them to the RX
+ * task. No protocol work and no logging here. */
 static void my_dw1000_on_received(void)
 {
-    ESP_LOGI("DW1000", "my_dw1000_on_received");
-    uint16_t len = dw1000_get_data(s_data, sizeof(s_data));
+    dw1000_rx_job_t job;
+    ESP_LOGI(TAG, "received somthing............");
+
+    memset(&job, 0, sizeof(job));
+    job.rx_ts = dw1000_ll_get_receive_timestamp();   /* read before anything else */
+    job.len   = dw1000_get_data(job.data, sizeof(job.data));
+
+    if (job.len == 0) {
+        return;
+    }
+    if (xQueueSend(s_rx_queue, &job, 0) != pdTRUE) {
+        s_rx_dropped++;   /* counted only: this runs in the IRQ task */
+    }
+}
+
+/* ---------------- RX protocol (runs in the RX task) --------------------- */
+static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts)
+{
+    (void)rx_ts;   /* Stage 2 will use the captured timestamp for ranging */
+    if (len > sizeof(s_data)) {
+        len = sizeof(s_data);
+    }
+    memcpy(s_data, frame, len);
     // ESP_LOGI("DW1000", "is_length_ok");
     if (len < DW1000_HDR_LEN + 1) {
         ESP_LOGW(TAG, "ANCHOR RX: short frame len=%u", (unsigned)len);
-        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
     // ESP_LOGI("DW1000", "is_peer");
@@ -886,7 +1027,6 @@ static void my_dw1000_on_received(void)
                  (unsigned)s_data[DW1000_OFF_TYPE],
                  (unsigned)e[7], (unsigned)e[6], (unsigned)e[5], (unsigned)e[4],
                  (unsigned)e[3], (unsigned)e[2], (unsigned)e[1], (unsigned)e[0]);
-        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
     // ESP_LOGI("DW1000", "is_addressed_to_me");
@@ -896,13 +1036,24 @@ static void my_dw1000_on_received(void)
                  (unsigned)s_data[DW1000_OFF_TYPE],
                  (unsigned)d[7], (unsigned)d[6], (unsigned)d[5], (unsigned)d[4],
                  (unsigned)d[3], (unsigned)d[2], (unsigned)d[1], (unsigned)d[0]);
-        dw1000_start_receive();   // re-arm: we dropped this frame 
         return;
     }
-    ESP_LOGI(TAG, "RX: peer frame type=<%s> len=%u",
-             dw1000_msg_type_to_string((s_data[DW1000_OFF_TYPE])), (unsigned)len);    
+    /* ---- DIAGNOSTIC 1: link quality of the frame we just decoded ---------
+       Read under the radio lock: these registers live in the chip and the IRQ
+       task could interleave its own SPI transactions with these reads. */
+    {
+        float rx_pwr, fp_pwr, qual;
+        dw1000_ll_radio_lock();
+        rx_pwr = dw1000_get_rx_power_dbm();
+        fp_pwr = dw1000_get_first_path_power_dbm();
+        qual   = dw1000_get_rx_quality();
+        dw1000_ll_radio_unlock();
+        ESP_LOGI(TAG, "RX: peer frame type=<%s> len=%u | rx_pwr=%.1f dBm first_path=%.1f dBm quality=%.1f",
+                 dw1000_msg_type_to_string((s_data[DW1000_OFF_TYPE])), (unsigned)len,
+                 (double)rx_pwr, (double)fp_pwr, (double)qual);
+    }
 
-     if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL) {
+    if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL) {
         // reply after REPLY_DELAY_US; the actual reply time is measured 
         s_t2 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
@@ -992,11 +1143,12 @@ static void my_dw1000_on_received(void)
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_PING) {
         // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
         ESP_LOGI("DW1000", "Ping");
+        received_pings ++;
         // send the computed range back to the tag 
-        memset(s_data, 0, sizeof(s_data));
-        s_data[DW1000_OFF_TYPE] = DW1000_MSG_PING_ACK;
-        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
-        dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+        // memset(s_data, 0, sizeof(s_data));
+        // s_data[DW1000_OFF_TYPE] = DW1000_MSG_PING_ACK;
+        // build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        // dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_PING_ACK) {
         // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
         ESP_LOGI("DW1000", "Ping ACK");
@@ -1006,6 +1158,113 @@ static void my_dw1000_on_received(void)
     ESP_LOGI("DW1000", "Receiver Counter: %d", rx_counter);
     ESP_LOGI("DW1000", "------------------------------");
     rx_counter++;
+}
+
+/* ---------------- RX task: protocol processing ---------------- */
+static void dw1000_rx_task(void *arg)
+{
+    (void)arg;
+    dw1000_rx_job_t job;
+
+    for (;;) {
+        if (xQueueReceive(s_rx_queue, &job, portMAX_DELAY) == pdTRUE) {
+            dw1000_process_rx(job.data, job.len, job.rx_ts);
+        }
+    }
+}
+
+/* ---------------- TX task: single owner of the TX/RX transition ----------------
+ * Keeps the radio in RX and, for every queued frame: idle -> load -> transmit
+ * -> wait for TXFRS -> back to RX. All mode changes happen here, so send
+ * problems can be attributed in one place. */
+static void dw1000_tx_task(void *arg)
+{
+    (void)arg;
+    dw1000_tx_job_t job;
+
+    for (;;) {
+        if (xQueueReceive(s_tx_queue, &job, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        dw1000_ll_radio_lock();
+
+        // if (job.scheduled) {
+        //     uint64_t now = dw1000_ll_get_system_timestamp();
+        //     if (now > job.target_ticks) {
+        //         s_tx_late++;
+        //         ESP_LOGW(TAG, "TX: scheduled time already passed by %llu ticks (late=%u)",
+        //                  (unsigned long long)(now - job.target_ticks),
+        //                  (unsigned)s_tx_late);
+        //     }
+        // }
+
+        dw1000_ll_set_data(job.data, job.len);
+        dw1000_ll_new_transmit();          /* idle + clear TX status + mode = TX */
+        dw1000_ll_tx_done_clear();
+
+        // if (job.scheduled) {
+        //     dw1000_ll_start_transmit_at(job.target_ticks);
+        // } else if (job.delay_us != 0) {
+        //     dw1000_ll_set_delay(job.delay_us);
+        //     dw1000_ll_start_transmit();
+        // } else {
+            dw1000_ll_start_transmit();
+        // }
+
+        dw1000_ll_radio_unlock();
+
+        /* Wait OUTSIDE the lock: the IRQ task needs it to report TXFRS. */
+        if (dw1000_ll_tx_done_wait(DW1000_TX_DONE_TIMEOUT_MS)) {
+            s_tx_sent++;
+        } else {
+            s_tx_timeout++;
+            ESP_LOGW(TAG, "TX: no TXFRS within %d ms (len=%u, timeouts=%u)",
+                     DW1000_TX_DONE_TIMEOUT_MS, (unsigned)job.len,
+                     (unsigned)s_tx_timeout);
+        }
+        ESP_LOGI(TAG, "sent successfull...................");
+
+        /* Back to RX - the TX task is the only place this happens. */
+        dw1000_ll_radio_lock();
+        dw1000_ll_rearm_receive();
+        dw1000_ll_radio_unlock();
+    }
+}
+
+/* ---------------- periodic TX/RX statistics (lowest priority) ----------------
+ * Never touches the radio and never blocks the TX/RX/IRQ tasks. */
+static void dw1000_stats_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint8_t sysctrl[DW1000_LEN_SYS_CTRL] = {0};
+        uint8_t sysmask[DW1000_LEN_SYS_MASK] = {0};
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        /* ---- DIAGNOSTIC 2: is the receiver still armed? ------------------
+           Read-only (nothing is cleared) and under the radio lock, so this
+           cannot disturb the IRQ path. rxenab=0 while frames are missing ->
+           the receiver got disarmed; rxenab=1 while frames are missing ->
+           the receiver was armed but nothing decoded. */
+        dw1000_ll_radio_lock();
+        dw1000_ll_read(DW1000_SYS_CTRL, DW1000_NO_SUB, sysctrl, sizeof(sysctrl));
+        dw1000_ll_read(DW1000_SYS_MASK, DW1000_NO_SUB, sysmask, sizeof(sysmask));
+        dw1000_ll_radio_unlock();
+
+        ESP_LOGW(TAG, "TX stats: sent=%u timeout=%u dropped=%u late=%u | rx_dropped=%u received_ping=%u | "
+                      "SYS_CTRL=%02X%02X%02X%02X rxenab=%d trxoff=%d | SYS_MASK=%02X%02X%02X%02X",
+                 (unsigned)s_tx_sent, (unsigned)s_tx_timeout,
+                 (unsigned)s_tx_dropped, (unsigned)s_tx_late,
+                 (unsigned)s_rx_dropped, (unsigned)received_pings,
+                 (unsigned)sysctrl[0], (unsigned)sysctrl[1],
+                 (unsigned)sysctrl[2], (unsigned)sysctrl[3],
+                 (sysctrl[1] & 0x01) ? 1 : 0,     /* RXENAB = bit 8 */
+                 (sysctrl[0] & 0x40) ? 1 : 0,     /* TRXOFF = bit 6 */
+                 (unsigned)sysmask[0], (unsigned)sysmask[1],
+                 (unsigned)sysmask[2], (unsigned)sysmask[3]);
+    }
 }
 
 void dw1000_set_peer_eui(const uint8_t peer_mac[6])
@@ -1095,17 +1354,18 @@ static bool dw1000_send_cal_set_and_wait(uint16_t new_ad, uint16_t timeout_ms)
 {
     uint8_t session = ++s_cal_session;
     TickType_t t0;
+    uint8_t frame[DW1000_HDR_LEN + DW1000_LEN_DATA];
 
     s_cal_ack_received = false;
     s_cal_ack_ad = 0;
 
-    memset(s_data, 0, sizeof(s_data));
-    s_data[DW1000_OFF_TYPE]        = DW1000_MSG_CAL_SET;
-    s_data[DW1000_OFF_CAL_SESSION] = session;
-    s_data[DW1000_OFF_CAL_AD]      = new_ad & 0xFF;
-    s_data[DW1000_OFF_CAL_AD + 1]  = (uint8_t)(new_ad >> 8);
-    build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
-    dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+    memset(frame, 0, sizeof(frame));
+    frame[DW1000_OFF_TYPE]        = DW1000_MSG_CAL_SET;
+    frame[DW1000_OFF_CAL_SESSION] = session;
+    frame[DW1000_OFF_CAL_AD]      = new_ad & 0xFF;
+    frame[DW1000_OFF_CAL_AD + 1]  = (uint8_t)(new_ad >> 8);
+    build_header(frame, s_pan_id, s_peer_eui, s_own_eui);
+    dw1000_send(frame, DW1000_HDR_LEN + DW1000_LEN_DATA);
 
     t0 = xTaskGetTickCount();
     while (!s_cal_ack_received &&

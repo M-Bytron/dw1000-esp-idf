@@ -140,19 +140,23 @@ void dw1000_idle(void);
 /* Start a single reception. Read the frame with dw1000_get_data(). */
 void dw1000_start_receive(void);
 
+/* Return to RX without clearing SYS_STATUS (cannot wipe an incoming frame). */
+void dw1000_rearm_receive(void);
+
 /* Auto-re-enable the receiver after each frame (polling mode). */
 void dw1000_receive_permanently(bool enable);
 
-/* Transmit a frame immediately. */
-void dw1000_send(const uint8_t *data, uint16_t len);
+/* Queue a frame for the TX task. Non-blocking; returns false if the frame was
+   rejected (bad length or queue full). The bytes are copied, so the caller's
+   buffer can be reused immediately. */
+bool dw1000_send(const uint8_t *data, uint16_t len);
 
-/* Transmit a frame after a relative delay (us) - useful for ranging. */
-void dw1000_send_at(const uint8_t *data, uint16_t len, uint32_t delay_us);
+/* Queue a frame with a relative TX delay (us) - useful for ranging. */
+bool dw1000_send_at(const uint8_t *data, uint16_t len, uint32_t delay_us);
 
-/* Transmit a frame at an absolute DW1000 timestamp (raw 40-bit ticks).
-   Used for precise two-way-ranging replies: the peer replies at exactly
-   rx_timestamp + reply_delay_ticks. */
-void dw1000_send_at_ticks(const uint8_t *data, uint16_t len, uint64_t target_ticks);
+/* Queue a frame to be transmitted at an absolute DW1000 timestamp (raw 40-bit
+   ticks). Used for precise two-way-ranging replies. */
+bool dw1000_send_at_ticks(const uint8_t *data, uint16_t len, uint64_t target_ticks);
 
 /* ============================ data buffer ============================ */
 

@@ -32,6 +32,18 @@ static const char *TAG = "DW1000_LL";
 /* The DW1000 is a single SPI slave; one handle is enough. */
 static spi_device_handle_t s_spi;
 
+/* Serialises all radio/SPI sequences between the IRQ task (status handling +
+   RX capture) and the application TX task (mode change + transmit). */
+static SemaphoreHandle_t s_radio_lock = NULL;
+
+/* Given by the IRQ handler when a transmit completes (TXFRS). */
+static SemaphoreHandle_t s_tx_done = NULL;
+
+/* SPI failures: counted always, logged only the first few times so a burst
+   cannot flood the UART (and cannot slow the IRQ handler down). */
+#define DW1000_SPI_ERR_LOG_MAX 10
+static volatile uint32_t s_spi_err_count = 0;
+
 /* SPI clock speeds used by the reference driver (DW1000.cpp). */
 #define DW1000_SPI_CLK_SLOW 2000000   /* 2 MHz, used while on XTI clock  */
 #define DW1000_SPI_CLK_FAST 16000000  /* 16 MHz, used on PLL/AUTO clock  */
@@ -39,6 +51,13 @@ static spi_device_handle_t s_spi;
 esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs)
 {
     esp_err_t ret;
+
+    if (s_radio_lock == NULL) {
+        s_radio_lock = xSemaphoreCreateMutex();
+        if (s_radio_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     spi_bus_config_t buscfg = {
         .sclk_io_num       = sck,
@@ -55,8 +74,8 @@ esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs
     }
 
     spi_device_interface_config_t devcfg = {
-        .mode            = 0,                  /* CPOL=0, CPHA=0, MSB first */
-        .clock_speed_hz  = DW1000_SPI_CLK_SLOW,
+        .mode            = 2,                  /* CPOL=0, CPHA=0, MSB first */
+        .clock_speed_hz  = 1E6,
         .spics_io_num    = cs,
         .queue_size      = 4,
         .cs_ena_posttrans = 10,                /* CS hold time (SPI clocks) */
@@ -93,7 +112,7 @@ static uint8_t dw1000_ll_build_header(uint8_t base, uint8_t reg, uint16_t sub,
     return 3;
 }
 
-void dw1000_ll_read(uint8_t reg, uint16_t sub, uint8_t *data, uint16_t n)
+esp_err_t dw1000_ll_read(uint8_t reg, uint16_t sub, uint8_t *data, uint16_t n)
 {
     uint8_t header[3];
     uint8_t hlen = dw1000_ll_build_header(DW1000_READ, reg, sub, header);
@@ -104,9 +123,14 @@ void dw1000_ll_read(uint8_t reg, uint16_t sub, uint8_t *data, uint16_t n)
     if (tx == NULL || rx == NULL) {
         free(tx);
         free(rx);
-        ESP_LOGE(TAG, "read 0x%02X: malloc failed (n=%u)", (unsigned)reg, (unsigned)n);
         memset(data, 0, n);
-        return;
+        s_spi_err_count++;
+        if (s_spi_err_count <= DW1000_SPI_ERR_LOG_MAX) {
+            ESP_LOGE(TAG, "SPI READ reg 0x%02X sub 0x%02X len %u FAILED: no memory (err #%u)",
+                     (unsigned)reg, (unsigned)sub, (unsigned)n,
+                     (unsigned)s_spi_err_count);
+        }
+        return ESP_ERR_NO_MEM;
     }
 
     memcpy(tx, header, hlen);
@@ -121,25 +145,38 @@ void dw1000_ll_read(uint8_t reg, uint16_t sub, uint8_t *data, uint16_t n)
 
     esp_err_t ret = spi_device_polling_transmit(s_spi, &t);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "read reg 0x%02X failed: %s", (unsigned)reg, esp_err_to_name(ret));
+        /* Zero-fill, but the caller MUST check the return value: an all-zero
+           register and a failed read look identical in `data`. */
         memset(data, 0, n);
+        s_spi_err_count++;
+        if (s_spi_err_count <= DW1000_SPI_ERR_LOG_MAX) {
+            ESP_LOGE(TAG, "SPI READ reg 0x%02X sub 0x%02X len %u FAILED: %s (err #%u)",
+                     (unsigned)reg, (unsigned)sub, (unsigned)n,
+                     esp_err_to_name(ret), (unsigned)s_spi_err_count);
+        }
     } else {
         memcpy(data, rx + hlen, n);
     }
 
     free(tx);
     free(rx);
+    return ret;
 }
 
-void dw1000_ll_write(uint8_t reg, uint16_t sub, const uint8_t *data, uint16_t n)
+esp_err_t dw1000_ll_write(uint8_t reg, uint16_t sub, const uint8_t *data, uint16_t n)
 {
     uint8_t header[3];
     uint8_t hlen = dw1000_ll_build_header(DW1000_WRITE, reg, sub, header);
 
     uint8_t *tx = (uint8_t *)malloc(hlen + n);
     if (tx == NULL) {
-        ESP_LOGE(TAG, "write 0x%02X: malloc failed (n=%u)", (unsigned)reg, (unsigned)n);
-        return;
+        s_spi_err_count++;
+        if (s_spi_err_count <= DW1000_SPI_ERR_LOG_MAX) {
+            ESP_LOGE(TAG, "SPI WRITE reg 0x%02X sub 0x%02X len %u FAILED: no memory (err #%u)",
+                     (unsigned)reg, (unsigned)sub, (unsigned)n,
+                     (unsigned)s_spi_err_count);
+        }
+        return ESP_ERR_NO_MEM;
     }
 
     memcpy(tx, header, hlen);
@@ -152,10 +189,16 @@ void dw1000_ll_write(uint8_t reg, uint16_t sub, const uint8_t *data, uint16_t n)
 
     esp_err_t ret = spi_device_polling_transmit(s_spi, &t);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "write reg 0x%02X failed: %s", (unsigned)reg, esp_err_to_name(ret));
+        s_spi_err_count++;
+        if (s_spi_err_count <= DW1000_SPI_ERR_LOG_MAX) {
+            ESP_LOGE(TAG, "SPI WRITE reg 0x%02X sub 0x%02X len %u FAILED: %s (err #%u)",
+                     (unsigned)reg, (unsigned)sub, (unsigned)n,
+                     esp_err_to_name(ret), (unsigned)s_spi_err_count);
+        }
     }
 
     free(tx);
+    return ret;
 }
 
 void dw1000_ll_reset(uint8_t rst)
@@ -908,9 +951,9 @@ static bool dw1000_ll_get_bit(const uint8_t *data, uint16_t n, uint16_t bit)
     return (data[idx] >> (bit % 8)) & 0x01;
 }
 
-static void dw1000_ll_read_sysstatus(void)
+static esp_err_t dw1000_ll_read_sysstatus(void)
 {
-    dw1000_ll_read(DW1000_SYS_STATUS, DW1000_NO_SUB, g_sysstatus, DW1000_LEN_SYS_STATUS);
+    return dw1000_ll_read(DW1000_SYS_STATUS, DW1000_NO_SUB, g_sysstatus, DW1000_LEN_SYS_STATUS);
 }
 
 static void dw1000_ll_write_transmit_frame_control(void)
@@ -1019,6 +1062,7 @@ void dw1000_ll_new_transmit(void)
     dw1000_ll_idle();
     dw1000_ll_clear_transmit_status();
     g_device_mode = DW1000_MODE_TX;
+    ESP_LOGI("DW1000_LL", "DW1000_MODE_TX");
 }
 
 void dw1000_ll_start_transmit(void)
@@ -1034,12 +1078,12 @@ void dw1000_ll_start_transmit(void)
     dw1000_ll_set_bit(sysctrl, sizeof(sysctrl), DW1000_TXSTRT_BIT, true);
     dw1000_ll_write(DW1000_SYS_CTRL, DW1000_NO_SUB, sysctrl, sizeof(sysctrl));
 
-    if (g_permanent_receive) {
-        g_device_mode = DW1000_MODE_RX;
-        dw1000_ll_start_receive();
-    } else {
-        g_device_mode = DW1000_MODE_IDLE;
-    }
+    /* RX is deliberately NOT re-enabled here. The application TX task owns the
+       TX/RX transition and re-arms RX after TXFRS, so RXENAB is never written
+       while the transmitter is still busy and the transition lives in one
+       place. g_permanent_receive still gates the IRQ fail/timeout re-arm. */
+    g_device_mode = DW1000_MODE_TX;
+    ESP_LOGI("DW1000_LL", "DW1000_MODE_TX");
 }
 
 /* ---- data buffer ---- */
@@ -1279,12 +1323,8 @@ void dw1000_ll_start_transmit_at(uint64_t target_ticks)
     dw1000_ll_set_bit(sysctrl, sizeof(sysctrl), DW1000_TXSTRT_BIT, true);
     dw1000_ll_write(DW1000_SYS_CTRL, DW1000_NO_SUB, sysctrl, sizeof(sysctrl));
 
-    if (g_permanent_receive) {
-        g_device_mode = DW1000_MODE_RX;
-        dw1000_ll_start_receive();
-    } else {
-        g_device_mode = DW1000_MODE_IDLE;
-    }
+    /* See dw1000_ll_start_transmit(): the TX task re-arms RX after TXFRS. */
+    g_device_mode = DW1000_MODE_TX;
 }
 
 /* ==========================================================================
@@ -1305,27 +1345,202 @@ void dw1000_ll_attach_receive_failed_handler(dw1000_ll_handler_t cb)      { g_on
 void dw1000_ll_attach_receive_timeout_handler(dw1000_ll_handler_t cb)     { g_on_receive_timeout = cb; }
 void dw1000_ll_attach_receive_timestamp_available_handler(dw1000_ll_handler_t cb) { g_on_receive_timestamp_available = cb; }
 
+/* ==========================================================================
+ * Interrupt statistics (diagnostics).
+ *
+ * The interrupt handler only increments these counters - it never formats or
+ * prints, so it does not block on the UART. A separate low-priority task
+ * reports them via dw1000_ll_diag_dump(). All of them are written only by the
+ * IRQ task.
+ * ======================================================================== */
+static volatile uint32_t s_irq_count         = 0;   /* handler runs with events       */
+static volatile uint32_t s_irq_empty_count   = 0;   /* runs with nothing latched       */
+static volatile uint32_t s_irq_pending_count = 0;   /* runs during which new events
+                                                       arrived (serviced next run)    */
+static volatile uint32_t s_irq_tx_count      = 0;   /* TXFRS events handled            */
+static volatile uint32_t s_irq_rx_good_count = 0;   /* good frames handled (RXFCG/DFR) */
+static volatile uint32_t s_irq_rx_fail_count = 0;   /* failed frames (CRC/sync/LDE)    */
+static volatile uint32_t s_irq_rx_to_count   = 0;   /* RX timeouts                     */
+static volatile uint32_t s_irq_spi_err_count = 0;   /* SYS_STATUS reads that failed    */
+
+/* -------------------------------------------------------------------------
+ * DIAGNOSTICS (no logging, counters only - they are printed by
+ * dw1000_ll_diag_dump() from the low-priority task).
+ * ---------------------------------------------------------------------- */
+static volatile uint32_t s_run_evt          = 0;  /* run carried a MASKED event bit   */
+static volatile uint32_t s_run_prog         = 0;  /* run carried only UNMASKED bits   */
+static volatile uint32_t s_empty_hi         = 0;  /* empty status, IRQ pin still HIGH */
+static volatile uint32_t s_empty_lo         = 0;  /* empty status, IRQ pin already LOW*/
+static volatile uint32_t s_seen_ldedone     = 0;  /* runs with LDEDONE (LDE done)     */
+static volatile uint32_t s_seen_pre         = 0;  /* runs with RXPRD  (preamble seen) */
+static volatile uint32_t s_seen_sfd         = 0;  /* runs with RXSFDD (SFD seen)      */
+static volatile uint32_t s_seen_phr         = 0;  /* runs with RXPHD  (PHY header)    */
+static volatile uint32_t s_seen_good        = 0;  /* runs with RXDFR|RXFCG (frame ok) */
+static volatile uint32_t s_seen_bad         = 0;  /* runs with PHE/FCE/RFSL/LDEERR    */
+static volatile uint32_t s_seen_to          = 0;  /* runs with RXRFTO/RXPTO/RXSFDTO   */
+static volatile uint32_t s_seen_pll         = 0;  /* runs with RFPLL_LL/CLKPLL_LL     */
+static int s_irq_gpio                        = -1; /* IRQ pin, for the level check   */
+
+/* Given by the GPIO ISR; the handler may give it to itself to re-run (see the
+   end of dw1000_ll_handle_interrupt). */
+static SemaphoreHandle_t s_irq_sem = NULL;
+
+/* -------------------------------------------------------------------------
+ * Very short, self-terminating IRQ trace.
+ *
+ * Logs at most DW1000_IRQ_TRACE_RUNS handler runs, ONE short line each, then
+ * switches itself off. UART output inside the handler is expensive (~3 ms per
+ * line at 115200 baud), so keep the budget tiny (e.g. 12) - it captures about
+ * one exchange and afterwards the timing is normal again. Do not leave it big.
+ *
+ * Line:  irq <5 status bytes> <tag>
+ *   tag 'T' = TXFRS         ('T'ransmit done)
+ *       'G' = RXFCG/RXDFR   ('G'ood frame: decoded, CRC ok)
+ *       'F' = RX failed (preamble header / CRC / sync loss / LDE error)
+ *       'O' = RX timed out (frame wait / preamble / SFD timeout)
+ *       'L' = LDEDONE only  (LDE ran: a signal was processed, no frame)
+ *       'P' = clock/RF PLL loss of lock
+ *       'e' = edge with NOTHING latched
+ *       '-' = other/undefined bit only
+ *
+ * Set to 0 to compile the trace out completely.
+ * ---------------------------------------------------------------------- */
+#define DW1000_IRQ_TRACE_RUNS 100
+
+#if DW1000_IRQ_TRACE_RUNS > 0
+static int s_trace_left = DW1000_IRQ_TRACE_RUNS;
+#endif
+
 static bool dw1000_ll_status_bit(uint16_t bit)
 {
     return dw1000_ll_get_bit(g_sysstatus, sizeof(g_sysstatus), bit);
 }
 
-static void dw1000_ll_clear_receive_timestamp_available_status(void)
+/* Re-enable the receiver for permanent-RX operation WITHOUT touching
+   SYS_STATUS. The IRQ handler has already cleared exactly the events it read
+   (see dw1000_ll_handle_interrupt), so clearing again here with a fixed mask
+   could wipe a frame that arrived in the meantime. Used by the IRQ task
+   (good-frame / fail / timeout re-arm) and by the application TX task. */
+void dw1000_ll_rearm_receive(void)
 {
-    memset(g_sysstatus, 0, sizeof(g_sysstatus));
-    dw1000_ll_set_bit(g_sysstatus, sizeof(g_sysstatus), DW1000_LDEDONE_BIT, true);
-    dw1000_ll_write(DW1000_SYS_STATUS, DW1000_NO_SUB, g_sysstatus, DW1000_LEN_SYS_STATUS);
-}
-
-static void dw1000_ll_clear_all_status(void)
-{
-    memset(g_sysstatus, 0xFF, sizeof(g_sysstatus));   /* write 1 to clear */
-    dw1000_ll_write(DW1000_SYS_STATUS, DW1000_NO_SUB, g_sysstatus, DW1000_LEN_SYS_STATUS);
+    dw1000_ll_idle();
+    g_device_mode = DW1000_MODE_RX;
+    dw1000_ll_start_receive();
+    /* NO logging here: this now runs from the IRQ handler on every received
+       frame, and UART output inside the handler makes the radio deaf. */
 }
 
 void dw1000_ll_handle_interrupt(void)
 {
-    dw1000_ll_read_sysstatus();
+    uint8_t status_entry[DW1000_LEN_SYS_STATUS];
+    uint8_t status_after[DW1000_LEN_SYS_STATUS];
+
+    /* Serialise with the application TX task: it may be mid-transmit or about
+       to change the mode. */
+    dw1000_ll_radio_lock();
+
+    /* A failed SPI read zero-fills the buffer, which would look EXACTLY like an
+       "empty" edge (all zeros). Detect it, retry once, and never report it as
+       empty - the frame would otherwise be silently thrown away. */
+    esp_err_t rd = dw1000_ll_read_sysstatus();
+    if (rd != ESP_OK) {
+        rd = dw1000_ll_read_sysstatus();       /* single retry */
+    }
+    if (rd != ESP_OK) {
+        s_irq_spi_err_count++;
+        if (s_irq_spi_err_count <= DW1000_SPI_ERR_LOG_MAX) {
+            ESP_LOGE(TAG, "IRQ: SYS_STATUS read failed (%s) - events left latched (irq_err #%u)",
+                     esp_err_to_name(rd), (unsigned)s_irq_spi_err_count);
+        }
+        dw1000_ll_radio_unlock();
+        return;
+    }
+    memcpy(status_entry, g_sysstatus, sizeof(status_entry));
+
+#if DW1000_IRQ_TRACE_RUNS > 0
+    /* Short, self-terminating trace: exactly what is latched at entry. */
+    if (s_trace_left > 0) {
+        char tag = '-';
+        if ((status_entry[0] | status_entry[1] | status_entry[2] |
+             status_entry[3] | status_entry[4]) == 0) {
+            tag = 'e';                      /* edge, but nothing latched    */
+        } else if (status_entry[0] & 0x80) {
+            tag = 'T';                      /* TXFRS                        */
+        } else if (status_entry[1] & 0x60) {
+            tag = 'G';                      /* RXDFR | RXFCG (good frame)   */
+        } else if ((status_entry[1] & 0x90) ||
+                   (status_entry[2] & 0x05)) {
+            tag = 'F';                      /* PHE/FCE, RFSL/LDEERR         */
+        } else if ((status_entry[2] & 0x22) ||
+                   (status_entry[3] & 0x04)) {
+            tag = 'O';                      /* RXRFTO/RXPTO/RXSFDTO         */
+        } else if (status_entry[1] & 0x04) {
+            tag = 'L';                      /* LDEDONE: signal, no frame    */
+        } else if (status_entry[3] & 0x03) {
+            tag = 'P';                      /* CLKPLL/RFPLL loss of lock    */
+        }
+        s_trace_left--;
+        ESP_LOGI(TAG, "irq %02X%02X%02X%02X%02X %c",
+                 (unsigned)status_entry[0], (unsigned)status_entry[1],
+                 (unsigned)status_entry[2], (unsigned)status_entry[3],
+                 (unsigned)status_entry[4], tag);
+    }
+#endif
+
+    /* ---- DIAGNOSTICS: classify this run (counters only, no logging) ----
+       Count which event groups are latched right now, and whether a MASKED
+       bit is present (only masked bits can raise the IRQ line). */
+    {
+        int i;
+        uint8_t masked = 0;
+        for (i = 0; i < DW1000_LEN_SYS_MASK; i++) {
+            masked |= (uint8_t)(status_entry[i] & g_sysmask[i]);
+        }
+        if (status_entry[1] & 0x04) { s_seen_ldedone++; }  /* LDEDONE      */
+        if (status_entry[1] & 0x01) { s_seen_pre++; }      /* RXPRD        */
+        if (status_entry[1] & 0x02) { s_seen_sfd++; }      /* RXSFDD       */
+        if (status_entry[1] & 0x08) { s_seen_phr++; }      /* RXPHD        */
+        if (status_entry[1] & 0x60) { s_seen_good++; }     /* RXDFR|RXFCG  */
+        if ((status_entry[1] & 0x90) ||
+            (status_entry[2] & 0x05)) { s_seen_bad++; }    /* fail bits    */
+        if ((status_entry[2] & 0x22) ||
+            (status_entry[3] & 0x04)) { s_seen_to++; }     /* timeout bits */
+        if (status_entry[3] & 0x03) { s_seen_pll++; }      /* PLL loss     */
+
+        if ((status_entry[0] | status_entry[1] | status_entry[2] |
+             status_entry[3] | status_entry[4]) == 0) {
+            /* Nothing latched. The IRQ pin level separates the two causes:
+                 pin still HIGH -> an event WAS cleared before we read it
+                 pin already LOW -> nothing was ever latched: glitch / extra
+                                    edge (not a DW1000 event at all) */
+            s_irq_empty_count++;
+            if (s_irq_gpio >= 0 && gpio_get_level((gpio_num_t)s_irq_gpio) != 0) {
+                s_empty_hi++;
+            } else {
+                s_empty_lo++;
+            }
+            dw1000_ll_radio_unlock();
+            return;
+        }
+        if (masked) {
+            s_run_evt++;    /* a real (masked) event: this edge is legit    */
+        } else {
+            s_run_prog++;   /* only unmasked bits: they cannot raise the
+                               line, so this edge came from somewhere else */
+        }
+    }
+    s_irq_count++;
+
+    /* Clear EXACTLY the events we just read, and do it now.
+       - A SYS_STATUS bit is cleared by writing 1 to it and left untouched by
+         writing 0, so writing our snapshot back clears only what we already
+         read.
+       - NEVER write 0xFF: that would also clear events which latched after the
+         read above and which we have not handled yet (the lost-frame race).
+       - Clearing now also pulls the IRQ line low, so any event that latches
+         while we process below raises a fresh rising edge and is picked up by
+         a follow-up run instead of being left latched with no edge. */
+    dw1000_ll_write(DW1000_SYS_STATUS, DW1000_NO_SUB, status_entry, sizeof(status_entry));
 
     /* clock / PLL loss of lock */
     if (dw1000_ll_status_bit(DW1000_CLKPLL_LL_BIT) ||
@@ -1336,61 +1551,94 @@ void dw1000_ll_handle_interrupt(void)
     }
 
     /* TX frame sent */
-    if (dw1000_ll_status_bit(DW1000_TXFRS_BIT) && g_on_sent) {
-        g_on_sent();
-        dw1000_ll_clear_transmit_status();
+    if (dw1000_ll_status_bit(DW1000_TXFRS_BIT)) {
+        s_irq_tx_count++;
+        if (g_on_sent) {
+            g_on_sent();
+        }
+        if (s_tx_done != NULL) {
+            xSemaphoreGive(s_tx_done);   /* wakes the application TX task */
+        }
     }
 
     /* RX timestamp available */
     if (dw1000_ll_status_bit(DW1000_LDEDONE_BIT) && g_on_receive_timestamp_available) {
         g_on_receive_timestamp_available();
-        dw1000_ll_clear_receive_timestamp_available_status();
     }
 
-    /* RX failed / timeout: re-arm automatically in permanent RX. */
-    if (dw1000_ll_status_bit(DW1000_LDEERR_BIT) ||
-        dw1000_ll_status_bit(DW1000_RXFCE_BIT) ||
-        dw1000_ll_status_bit(DW1000_RXPHE_BIT) ||
-        dw1000_ll_status_bit(DW1000_RXRFSL_BIT)) {
-        if (g_on_receive_failed) {
-            g_on_receive_failed();
+    /* RX failed / timeout: re-arm automatically in permanent RX.
+       BUT: if the receiver has seen the preamble/SFD/PHY header and the frame
+       has not completed yet, a reception is still in flight - calling idle()
+       now would abort it. Any fail/timeout bit we read then is stale. (This
+       matters now that LDEDONE is masked, because a run can arrive in the
+       middle of a frame.) */
+    {
+        bool rx_in_progress =
+            ((status_entry[1] & 0x0B) != 0) &&      /* RXPRD|RXSFDD|RXPHD */
+            ((status_entry[1] & 0xE0) == 0);        /* no DFR/FCG/FCE     */
+
+        if (dw1000_ll_status_bit(DW1000_LDEERR_BIT) ||
+            dw1000_ll_status_bit(DW1000_RXFCE_BIT) ||
+            dw1000_ll_status_bit(DW1000_RXPHE_BIT) ||
+            dw1000_ll_status_bit(DW1000_RXRFSL_BIT)) {
+            s_irq_rx_fail_count++;
+            if (g_on_receive_failed) {
+                g_on_receive_failed();
+            }
+            if (g_permanent_receive && !rx_in_progress) {
+                dw1000_ll_rearm_receive();
+            }
+        } else if (dw1000_ll_status_bit(DW1000_RXRFTO_BIT) ||
+                   dw1000_ll_status_bit(DW1000_RXPTO_BIT) ||
+                   dw1000_ll_status_bit(DW1000_RXSFDTO_BIT)) {
+            s_irq_rx_to_count++;
+            if (g_on_receive_timeout) {
+                g_on_receive_timeout();
+            }
+            if (g_permanent_receive && !rx_in_progress) {
+                dw1000_ll_rearm_receive();
+            }
+        } else if (dw1000_ll_status_bit(DW1000_RXFCG_BIT) ||
+                   dw1000_ll_status_bit(DW1000_RXDFR_BIT)) {
+            /* A good frame: capture it. The RX re-arm is NOT done here - the
+               application answers every received frame and its TX task owns the
+               TX/RX transition, re-arming RX after TXFRS. */
+            s_irq_rx_good_count++;
+            if (g_on_received) {
+                g_on_received();
+            }
         }
-        dw1000_ll_clear_receive_status();
-        if (g_permanent_receive) {
-            dw1000_ll_new_receive();
-            dw1000_ll_start_receive();
-        }
-    } else if (dw1000_ll_status_bit(DW1000_RXRFTO_BIT) ||
-               dw1000_ll_status_bit(DW1000_RXPTO_BIT) ||
-               dw1000_ll_status_bit(DW1000_RXSFDTO_BIT)) {
-        if (g_on_receive_timeout) {
-            g_on_receive_timeout();
-        }
-        dw1000_ll_clear_receive_status();
-        if (g_permanent_receive) {
-            dw1000_ll_new_receive();
-            dw1000_ll_start_receive();
-        }
-    } else if (dw1000_ll_status_bit(DW1000_RXFCG_BIT) ||
-               dw1000_ll_status_bit(DW1000_RXDFR_BIT)) {
-        /* A good frame: call the handler. We do NOT auto re-arm here, because
-           the handler may have started a (delayed) TX - calling idle() now
-           would abort it. The handler re-arms RX (or the TX's permanent
-           re-arm does). */
-        if (g_on_received) {
-            g_on_received();
-        }
-        dw1000_ll_clear_receive_status();
     }
 
-    /* clear whatever is left unhandled */
-    dw1000_ll_clear_all_status();
+    /* Diagnostics: did anything latch while we were handling? */
+    dw1000_ll_read(DW1000_SYS_STATUS, DW1000_NO_SUB, status_after, sizeof(status_after));
+    {
+        int i;
+        uint8_t masked_after = 0;
+        for (i = 0; i < DW1000_LEN_SYS_MASK; i++) {
+            masked_after |= (uint8_t)(status_after[i] & g_sysmask[i]);
+        }
+        if (status_after[0] | status_after[1] | status_after[2] |
+            status_after[3] | status_after[4]) {
+            s_irq_pending_count++;
+        }
+        /* A MASKED event that latched during this run leaves the IRQ line HIGH
+           (our clear only wrote back what we read), so no new rising edge will
+           ever be generated for it. Re-run the handler instead of waiting for
+           an edge that cannot come - otherwise that event is lost. */
+        if (masked_after && s_irq_sem != NULL) {
+            xSemaphoreGive(s_irq_sem);
+        }
+    }
+
+    dw1000_ll_rearm_receive();
+    dw1000_ll_radio_unlock();
 }
 
 /* ---- IRQ service: GPIO ISR + high-priority dispatch task ---- */
 
 static TaskHandle_t s_irq_task = NULL;
-static SemaphoreHandle_t s_irq_sem = NULL;
+static TaskHandle_t s_diag_task = NULL;
 
 static void IRAM_ATTR dw1000_ll_gpio_isr(void *arg)
 {
@@ -1409,13 +1657,83 @@ static void dw1000_ll_irq_task(void *arg)
     }
 }
 
+/* Print the interrupt counters. Safe to call from any task - it is NOT called
+   from the interrupt handler, so printing cannot widen the event/clear race. */
+void dw1000_ll_diag_dump(void)
+{
+    ESP_LOGW(TAG, "IRQ runs=%u evt=%u prog=%u empty=%u(hi=%u,lo=%u) pend=%u | tx=%u rxgood=%u rxfail=%u rxto=%u | seen lde=%u pre=%u sfd=%u phr=%u frame=%u bad=%u tmo=%u pll=%u | spi_err=%u irq_rd_err=%u",
+             (unsigned)s_irq_count, (unsigned)s_run_evt, (unsigned)s_run_prog,
+             (unsigned)s_irq_empty_count, (unsigned)s_empty_hi, (unsigned)s_empty_lo,
+             (unsigned)s_irq_pending_count,
+             (unsigned)s_irq_tx_count, (unsigned)s_irq_rx_good_count,
+             (unsigned)s_irq_rx_fail_count, (unsigned)s_irq_rx_to_count,
+             (unsigned)s_seen_ldedone, (unsigned)s_seen_pre, (unsigned)s_seen_sfd,
+             (unsigned)s_seen_phr, (unsigned)s_seen_good, (unsigned)s_seen_bad,
+             (unsigned)s_seen_to, (unsigned)s_seen_pll,
+             (unsigned)s_spi_err_count, (unsigned)s_irq_spi_err_count);
+}
+
+/* Low-priority task that just reports the counters periodically. */
+static void dw1000_ll_diag_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        dw1000_ll_diag_dump();
+    }
+}
+
+/* ---- radio lock + TX-done handshake (shared with the application) ---- */
+
+/* Take/release the mutex that serialises complete radio sequences between the
+   IRQ task and the application TX task. Always released before waiting for a
+   TX to complete, so there is no deadlock with the IRQ task. */
+void dw1000_ll_radio_lock(void)
+{
+    if (s_radio_lock != NULL) {
+        xSemaphoreTake(s_radio_lock, portMAX_DELAY);
+    }
+}
+
+void dw1000_ll_radio_unlock(void)
+{
+    if (s_radio_lock != NULL) {
+        xSemaphoreGive(s_radio_lock);
+    }
+}
+
+/* Drop any stale TX-done signal (call before starting a transmit). */
+void dw1000_ll_tx_done_clear(void)
+{
+    if (s_tx_done != NULL) {
+        xSemaphoreTake(s_tx_done, 0);
+    }
+}
+
+/* Wait for the IRQ task to report TXFRS. Returns false on timeout. */
+bool dw1000_ll_tx_done_wait(uint32_t timeout_ms)
+{
+    if (s_tx_done == NULL) {
+        return false;
+    }
+    return xSemaphoreTake(s_tx_done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
 esp_err_t dw1000_ll_irq_start(uint8_t irq_gpio)
 {
     esp_err_t ret;
 
+    s_irq_gpio = (int)irq_gpio;   /* for the empty-edge pin-level diagnostic */
+
     if (s_irq_sem == NULL) {
         s_irq_sem = xSemaphoreCreateBinary();
         if (s_irq_sem == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (s_tx_done == NULL) {
+        s_tx_done = xSemaphoreCreateBinary();
+        if (s_tx_done == NULL) {
             return ESP_ERR_NO_MEM;
         }
     }
@@ -1424,12 +1742,16 @@ esp_err_t dw1000_ll_irq_start(uint8_t irq_gpio)
             return ESP_ERR_NO_MEM;
         }
     }
+    if (s_diag_task == NULL) {
+        /* lowest priority: it can never delay the IRQ task or the radio */
+        xTaskCreate(dw1000_ll_diag_task, "dw1000_diag", 2560, NULL, 1, &s_diag_task);
+    }
 
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << irq_gpio),
         .mode         = GPIO_MODE_INPUT,
         .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type    = GPIO_INTR_POSEDGE,   /* DW1000 IRQ is active-high */
     };
     gpio_config(&io);
@@ -1444,8 +1766,6 @@ esp_err_t dw1000_ll_irq_start(uint8_t irq_gpio)
     }
     return ESP_OK;
 }
-
-/* ---- diagnostics ---- */
 
 void dw1000_ll_get_temp_and_vbat(float *temp, float *vbat)
 {

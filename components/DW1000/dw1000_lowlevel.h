@@ -28,11 +28,17 @@ esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs
 /*
  * Read `n` bytes from a register. Use DW1000_NO_SUB (from dw1000_regs.h) as
  * `sub` to access the whole register without sub-addressing.
+ *
+ * Returns ESP_OK on success, or the SPI/driver error on failure. ON FAILURE
+ * `data` IS ZERO-FILLED, so a failed read is indistinguishable from a real
+ * all-zero register unless you check the return value. Every failure is also
+ * logged (first few only) and counted - see dw1000_ll_diag_dump().
  */
-void dw1000_ll_read(uint8_t reg, uint16_t sub, uint8_t *data, uint16_t n);
+esp_err_t dw1000_ll_read(uint8_t reg, uint16_t sub, uint8_t *data, uint16_t n);
 
-/* Write `n` bytes to a register (see dw1000_ll_read for `sub`). */
-void dw1000_ll_write(uint8_t reg, uint16_t sub, const uint8_t *data, uint16_t n);
+/* Write `n` bytes to a register (see dw1000_ll_read for `sub`).
+   Returns ESP_OK on success, or the SPI/driver error on failure. */
+esp_err_t dw1000_ll_write(uint8_t reg, uint16_t sub, const uint8_t *data, uint16_t n);
 
 /*
  * Hard reset via the RSTn pin (active low). The pin is pulsed low and then
@@ -174,6 +180,21 @@ void dw1000_ll_interrupt_on_receive_timestamp_available(int enabled);
    radio is configured. Returns ESP_OK on success. */
 esp_err_t dw1000_ll_irq_start(uint8_t irq_gpio);
 
+/* Radio sequence lock, shared between the IRQ task and the application TX
+   task. Take it around any group of register accesses that must not be
+   interleaved with another context's. Never hold it while waiting for TXFRS. */
+void dw1000_ll_radio_lock(void);
+void dw1000_ll_radio_unlock(void);
+
+/* TX-done handshake: the IRQ task signals TXFRS; the TX task clears before a
+   transmit and waits for it afterwards. */
+void dw1000_ll_tx_done_clear(void);
+bool dw1000_ll_tx_done_wait(uint32_t timeout_ms);
+
+/* Put the radio back into receive mode without touching SYS_STATUS (the IRQ
+   handler already cleared exactly the events it read). */
+void dw1000_ll_rearm_receive(void);
+
 /* Read SYS_STATUS and dispatch to the attached handlers (clears the events).
    Called internally by the IRQ task; exposed for completeness. */
 void dw1000_ll_handle_interrupt(void);
@@ -182,6 +203,10 @@ void dw1000_ll_handle_interrupt(void);
 
 /* On-chip temperature (Celsius) and battery voltage (Volts). */
 void dw1000_ll_get_temp_and_vbat(float *temp, float *vbat);
+
+/* Print the interrupt/race counters (see dw1000_lowlevel.c). Safe to call from
+   any task; it is reported periodically by the driver's low-priority diag task. */
+void dw1000_ll_diag_dump(void);
 
 #ifdef __cplusplus
 }

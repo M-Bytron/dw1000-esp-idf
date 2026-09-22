@@ -50,7 +50,7 @@ uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
    printed at boot as "My BLE MAC: ..."). Device A uses Device B's MAC. */
-static const uint8_t peer_eui[6] = {0x3C, 0x61, 0x05, 0x12, 0xC9, 0x48};
+static const uint8_t peer_eui[6] = {0x3C, 0x61, 0x05, 0x12, 0xC9, 0x4A};
 
 /* ------------------------- callback ------------------------ */
 static bool on_distance(float distance_m, bool got_reading)
@@ -78,7 +78,7 @@ static void dw1000_radio_task(void *arg)
     /* init SPI bus + reset + LDE microcode load */
     dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST,
                  MY_PAN_ID, MY_SHORT_ADDR,
-                  DW1000_MODE_SHORTDATA_FAST_ACCURACY,
+                  DW1000_MODE_LONGDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, antenna_delay);
 
     /* pair with the anchor */
@@ -100,17 +100,33 @@ static void dw1000_radio_task(void *arg)
 
     int ping_counter = 0;
 
-    /* continuous DS-TWR ranging */
-    while (1) {
-        // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
+    // /* continuous DS-TWR ranging */
+    // while (1) {
+    //     // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
+
+    //     bool ok = dw1000_ping(PIN_IRQ, 100);
+    //     ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
+    //     ping_counter++;
+    //     if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
+    //     else ESP_LOGW("MAIN", "NO Ping");
+    //     vTaskDelay(pdMS_TO_TICKS(1000));
+    // }
+    for (int i = 0; i<50; i++){
+                // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
 
         bool ok = dw1000_ping(PIN_IRQ, 100);
         ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
         ping_counter++;
         if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
         else ESP_LOGW("MAIN", "NO Ping");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+    }
+    while (1)
+    {
         vTaskDelay(pdMS_TO_TICKS(700));
     }
+    
 }
 
 void app_main(void)
