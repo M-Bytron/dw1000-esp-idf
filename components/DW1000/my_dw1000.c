@@ -826,7 +826,11 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
     TickType_t t0 = xTaskGetTickCount();
     while (!s_result_ready &&
            (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+        /* MUST block at least one tick: pdMS_TO_TICKS(5) == 0 at
+         * CONFIG_FREERTOS_HZ=100, and vTaskDelay(0) does not block. The caller
+         * (mv_monitor, prio 5) would then spin at 100% CPU for the whole
+         * timeout, starving IDLE0 and tripping the task watchdog. */
+        vTaskDelay(1);    
     }
 
     ok = s_result_ready;
@@ -963,7 +967,7 @@ bool dw1000_ping(int irq_gpio, int timeout_ms)
     TickType_t t0 = xTaskGetTickCount();
     while (!s_result_ready &&
            (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(1);   /* >= 1 tick, see dw1000_run_tag() */
     }
 
     ok = s_result_ready;
@@ -1370,7 +1374,7 @@ static bool dw1000_send_cal_set_and_wait(uint16_t new_ad, uint16_t timeout_ms)
     t0 = xTaskGetTickCount();
     while (!s_cal_ack_received &&
            (xTaskGetTickCount() - t0) < pdMS_TO_TICKS(timeout_ms)) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(1);   /* >= 1 tick, see dw1000_run_tag() */
     }
 
     if (!s_cal_ack_received) {

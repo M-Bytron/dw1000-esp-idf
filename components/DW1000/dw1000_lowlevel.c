@@ -1033,7 +1033,7 @@ void dw1000_ll_manage_lde(void)
 
     dw1000_ll_write(DW1000_PMSC, DW1000_PMSC_CTRL0_SUB, pmscctrl0, 2);
     dw1000_ll_write(DW1000_OTP_IF, DW1000_OTP_CTRL_SUB, otpctrl, 2);
-    vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(1);   /* >= 1 tick: pdMS_TO_TICKS(5) == 0 at 100 Hz and does not block */
 
     pmscctrl0[0] = 0x00;
     pmscctrl0[1] &= 0x02;
