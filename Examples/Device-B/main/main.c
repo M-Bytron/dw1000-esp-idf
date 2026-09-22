@@ -36,21 +36,21 @@
 // const uint8_t PIN_IRQ  = 13;
 // const uint8_t PIN_RST  = 32;
 
-// const uint8_t PIN_SCK  = 12;
-// const uint8_t PIN_MISO = 13;
-// const uint8_t PIN_MOSI = 11;
-// const uint8_t PIN_CS   = 10;
-// const uint8_t PIN_IRQ  = 14;
-// const uint8_t PIN_RST  = 9;
+const uint8_t PIN_SCK  = 12;
+const uint8_t PIN_MISO = 13;
+const uint8_t PIN_MOSI = 11;
+const uint8_t PIN_CS   = 10;
+const uint8_t PIN_IRQ  = 14;
+const uint8_t PIN_RST  = 9;
 const uint8_t LORA_SS  = 46;
 const uint8_t LORA_RST  = 3;
 
-const uint8_t PIN_SCK  = 7;
-const uint8_t PIN_MISO = 8;
-const uint8_t PIN_MOSI = 6;
-const uint8_t PIN_CS   = 5;
-const uint8_t PIN_IRQ  = 9;
-const uint8_t PIN_RST  = 4;
+// const uint8_t PIN_SCK  = 7;
+// const uint8_t PIN_MISO = 8;
+// const uint8_t PIN_MOSI = 6;
+// const uint8_t PIN_CS   = 5;
+// const uint8_t PIN_IRQ  = 9;
+// const uint8_t PIN_RST  = 4;
 
 
 
@@ -104,7 +104,7 @@ static void dw1000_radio_task(void *arg)
     //     ESP_LOGE("TAG", "spi_bus_initialize failed: %s", esp_err_to_name(ret));
     // }
 
-    // lora_init(LORA_SS,LORA_RST,PIN_MOSI,PIN_MISO,PIN_SCK);
+    lora_init(LORA_SS,LORA_RST,PIN_MOSI,PIN_MISO,PIN_SCK);
     /* Init SPI bus + reset + LDE microcode load */
     dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST,
                  MY_PAN_ID, MY_SHORT_ADDR,
