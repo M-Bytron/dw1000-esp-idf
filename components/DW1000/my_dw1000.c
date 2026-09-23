@@ -110,7 +110,7 @@ static void dw1000_stats_task(void *arg);
 void dw1000_on_received(dw1000_handler_t cb);
 static void my_dw1000_on_received(void);
 
-esp_err_t spi_init(uint8_t sck, uint8_t miso, uint8_t mosi)
+esp_err_t spi_init_for_uwb(uint8_t sck, uint8_t miso, uint8_t mosi)
 {
 
     esp_err_t ret;

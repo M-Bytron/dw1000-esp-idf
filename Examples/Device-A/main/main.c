@@ -76,7 +76,7 @@ static void dw1000_radio_task(void *arg)
     }
 
     // ----- SPI init (required for DW1000) -----
-    spi_init(PIN_SCK, PIN_MISO, PIN_MOSI);
+    spi_init_for_uwb(PIN_SCK, PIN_MISO, PIN_MOSI);
 
     // ----- DW1000 Init: Init reset + LDE microcode load
     dw1000_init(PIN_CS, PIN_IRQ, PIN_RST,

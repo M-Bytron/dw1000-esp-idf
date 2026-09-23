@@ -73,7 +73,7 @@ static void dw1000_radio_task(void *arg)
     }
     
     // ----- SPI init (required for DW1000) -----
-    spi_init(PIN_SCK, PIN_MISO, PIN_MOSI);
+    spi_init_for_uwb(PIN_SCK, PIN_MISO, PIN_MOSI);
 
     // ----- LoRa init (optional, for debugging) -> comment out if not used
     // lora_init(LORA_SS,LORA_RST,PIN_MOSI,PIN_MISO,PIN_SCK);

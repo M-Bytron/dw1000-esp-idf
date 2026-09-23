@@ -53,7 +53,7 @@ typedef void (*dw1000_handler_t)(void);
  * Initialise the SPI bus.
  * Call this once before any spi device configuration.
  */
-esp_err_t spi_init(uint8_t sck, uint8_t miso, uint8_t mosi);
+esp_err_t spi_init_for_uwb(uint8_t sck, uint8_t miso, uint8_t mosi);
 
 /*
  * Reset and select the DW1000.
