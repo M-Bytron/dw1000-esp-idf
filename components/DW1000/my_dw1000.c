@@ -1085,6 +1085,7 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
 
     if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL) {
         // reply after REPLY_DELAY_US; the actual reply time is measured 
+        ESP_LOGI(TAG, "DW1000_MSG_POLL");
         s_t2 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
         uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
@@ -1096,6 +1097,7 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL_ACK) {
+        ESP_LOGI(TAG, "DW1000_MSG_POLL_ACK");
         // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
         uint64_t t4 = dw1000_get_rx_timestamp();
         uint64_t now = dw1000_get_system_timestamp();
@@ -1112,6 +1114,7 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
         s_last_sent_type = DW1000_MSG_RANGE;
         dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE) {
+        ESP_LOGI(TAG, "DW1000_MSG_RANGE");
         // we have T2/T3; RANGE carries T1/T4/T5; measure T6 now 
         uint64_t t1 = get_ts(s_data + DW1000_OFF_T1);
         uint64_t t4 = get_ts(s_data + DW1000_OFF_T4);
@@ -1138,6 +1141,7 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE_REPORT) {
+        ESP_LOGI(TAG, "DW1000_MSG_RANGE_REPORT");
         memcpy(&s_last_distance, s_data + DW1000_OFF_T1, sizeof(s_last_distance));
         s_result_ready = true;
         dw1000_start_receive();   // re-arm for the next exchange 
@@ -1163,6 +1167,7 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
         build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
         dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_CAL_ACK) {
+        ESP_LOGI(TAG, "DW1000_MSG_CALL_ACK");
         // the anchor applied the antenna delay we asked for 
         s_cal_ack_ad = (uint16_t)(s_data[DW1000_OFF_CAL_AD] |
                                   ((uint16_t)s_data[DW1000_OFF_CAL_AD + 1] << 8));

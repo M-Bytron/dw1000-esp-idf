@@ -103,27 +103,22 @@ static void dw1000_radio_task(void *arg)
 
     int ping_counter = 1;
 
-    // /* continuous DS-TWR ranging */
-    // while (1) {
-    //     // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
-
-    //     bool ok = dw1000_ping(PIN_IRQ, 100);
-    //     ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
-    //     ping_counter++;
-    //     if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
-    //     else ESP_LOGW("MAIN", "NO Ping");
-    //     vTaskDelay(pdMS_TO_TICKS(1000));
-    // }
-    for (int i = 1; i<=50; i++){
-        // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
-        bool ok = dw1000_ping(PIN_IRQ, 100);
-        ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
-        ping_counter++;
-        if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
-        else ESP_LOGW("MAIN", "NO Ping");
+    /* continuous DS-TWR ranging */
+    while (1) {
+        ESP_LOGI("MAIN", "Tryiny to measure distance");
+        dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance);        
         vTaskDelay(pdMS_TO_TICKS(1000));
-
     }
+
+    // for (int i = 1; i<=50; i++){
+        // bool ok = dw1000_ping(PIN_IRQ, 100);
+        // ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
+        // ping_counter++;
+        // if (ok) ESP_LOGI("MAIN", ">>   Ping Successful");
+        // else ESP_LOGW("MAIN", "NO Ping");
+        // vTaskDelay(pdMS_TO_TICKS(1000));
+    // }
+
     while (1)
     {
         vTaskDelay(pdMS_TO_TICKS(700));

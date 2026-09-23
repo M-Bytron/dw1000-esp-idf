@@ -1049,7 +1049,7 @@ void dw1000_ll_new_transmit(void)
     dw1000_ll_idle();
     dw1000_ll_clear_transmit_status();
     g_device_mode = DW1000_MODE_TX;
-    ESP_LOGI("DW1000_LL", "DW1000_MODE_TX");
+    // ESP_LOGI("DW1000_LL", "DW1000_MODE_TX");
 }
 
 void dw1000_ll_start_transmit(void)
@@ -1070,7 +1070,7 @@ void dw1000_ll_start_transmit(void)
        while the transmitter is still busy and the transition lives in one
        place. g_permanent_receive still gates the IRQ fail/timeout re-arm. */
     g_device_mode = DW1000_MODE_TX;
-    ESP_LOGI("DW1000_LL", "DW1000_MODE_TX");
+    // ESP_LOGI("DW1000_LL", "DW1000_MODE_TX");
 }
 
 /* ---- data buffer ---- */
@@ -1392,7 +1392,7 @@ static SemaphoreHandle_t s_irq_sem = NULL;
  *
  * Set to 0 to compile the trace out completely.
  * ---------------------------------------------------------------------- */
-#define DW1000_IRQ_TRACE_RUNS 0
+#define DW1000_IRQ_TRACE_RUNS 50
 
 #if DW1000_IRQ_TRACE_RUNS > 0
 static int s_trace_left = DW1000_IRQ_TRACE_RUNS;
