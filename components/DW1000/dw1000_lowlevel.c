@@ -1392,7 +1392,7 @@ static SemaphoreHandle_t s_irq_sem = NULL;
  *
  * Set to 0 to compile the trace out completely.
  * ---------------------------------------------------------------------- */
-#define DW1000_IRQ_TRACE_RUNS 50
+#define DW1000_IRQ_TRACE_RUNS 0
 
 #if DW1000_IRQ_TRACE_RUNS > 0
 static int s_trace_left = DW1000_IRQ_TRACE_RUNS;

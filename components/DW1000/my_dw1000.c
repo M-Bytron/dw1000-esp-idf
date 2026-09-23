@@ -33,7 +33,7 @@ static uint16_t s_pan_id       = 0xFFFF;
 static uint8_t  s_own_eui[8];
 static uint8_t  s_peer_eui[8]  = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static bool     s_peer_set     = false;
-uint16_t rx_counter = 0;
+uint16_t rx_counter = 1;
 uint16_t received_pings= 0;
 /* ============================ mode presets ============================ */
 
@@ -1175,10 +1175,10 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
         ESP_LOGI("DW1000", "Ping");
         received_pings ++;
         // send the computed range back to the tag 
-        // memset(s_data, 0, sizeof(s_data));
-        // s_data[DW1000_OFF_TYPE] = DW1000_MSG_PING_ACK;
-        // build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
-        // dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
+        memset(s_data, 0, sizeof(s_data));
+        s_data[DW1000_OFF_TYPE] = DW1000_MSG_PING_ACK;
+        build_header(s_data, s_pan_id, s_peer_eui, s_own_eui);
+        dw1000_send(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_PING_ACK) {
         // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
         ESP_LOGI("DW1000", "Ping ACK");

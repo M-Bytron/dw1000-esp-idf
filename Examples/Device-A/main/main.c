@@ -101,7 +101,7 @@ static void dw1000_radio_task(void *arg)
     //                        "(set this on BOTH boards)", (unsigned)ad);
     // }
 
-    int ping_counter = 0;
+    int ping_counter = 1;
 
     // /* continuous DS-TWR ranging */
     // while (1) {
@@ -114,9 +114,8 @@ static void dw1000_radio_task(void *arg)
     //     else ESP_LOGW("MAIN", "NO Ping");
     //     vTaskDelay(pdMS_TO_TICKS(1000));
     // }
-    for (int i = 0; i<50; i++){
-                // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
-
+    for (int i = 1; i<=50; i++){
+        // dw1000_run_tag(PIN_IRQ, DW1000_RANGE_TIMEOUT_MS, on_distance)
         bool ok = dw1000_ping(PIN_IRQ, 100);
         ESP_LOGI("MAIN", "Ping Counter: %d", ping_counter);
         ping_counter++;
