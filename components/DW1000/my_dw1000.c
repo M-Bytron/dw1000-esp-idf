@@ -18,6 +18,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "driver/spi_master.h"
+
 
 static const char *TAG = "DW1000";
 
@@ -102,8 +104,30 @@ static void dw1000_stats_task(void *arg);
 void dw1000_on_received(dw1000_handler_t cb);
 static void my_dw1000_on_received(void);
 
-bool dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
-                 uint8_t cs, uint8_t irq, uint8_t rst,  
+esp_err_t spi_init(uint8_t sck, uint8_t miso, uint8_t mosi)
+{
+
+    esp_err_t ret;
+    spi_bus_config_t buscfg = {
+        .sclk_io_num       = sck,
+        .mosi_io_num       = mosi,
+        .miso_io_num       = miso,
+        .quadwp_io_num     = -1,
+        .quadhd_io_num     = -1,
+        .max_transfer_sz   = 0,
+    };
+    ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "SPI master ready (sck=%u miso=%u mosi=%u)",
+             (unsigned)sck, (unsigned)miso, (unsigned)mosi);
+    return ESP_OK;
+
+}
+
+bool dw1000_init(uint8_t cs, uint8_t irq, uint8_t rst,  
                  uint16_t network_id,
                  uint16_t device_address,
                  const uint8_t mode[3],
@@ -112,7 +136,7 @@ bool dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
 {
     (void)irq; /* interrupt handling is ported in a later step */
 
-    if (dw1000_ll_spi_init(sck, miso, mosi, cs) != ESP_OK) {
+    if (dw1000_ll_spi_init(cs) != ESP_OK) {
         ESP_LOGE(TAG, "SPI init failed - aborting");
         return false;
     }
@@ -173,7 +197,9 @@ bool dw1000_probe(void)
 
     /* A real DW1000 answers 0xDECA0130 -> top 16 bits are 0xDECA. */
     if ((id & 0xFFFF0000u) == 0xDECA0000u) {
+        ESP_LOGI(TAG, "---------------------------------------------------");
         ESP_LOGI(TAG, "-> DW1000 module detected - SPI OK (ID: 0x%08X)", (unsigned)id);
+        ESP_LOGI(TAG, "---------------------------------------------------");
         return true;
     }
 
@@ -1287,7 +1313,7 @@ void dw1000_set_peer_eui(const uint8_t peer_mac[6])
     //   OFF so any valid PHY frame is received and we decide here by source EUI.
     //   This avoids depending on the DW1000's address-match hardware. 
     dw1000_ll_apply_frame_filter(0, 0);
-    ESP_LOGI(TAG, "Paired with peer BLE MAC %02X:%02X:%02X:%02X:%02X:%02X",
+    ESP_LOGW(TAG, "Paired with peer BLE MAC %02X:%02X:%02X:%02X:%02X:%02X",
              (unsigned)peer_mac[0], (unsigned)peer_mac[1], (unsigned)peer_mac[2],
              (unsigned)peer_mac[3], (unsigned)peer_mac[4], (unsigned)peer_mac[5]);
 }

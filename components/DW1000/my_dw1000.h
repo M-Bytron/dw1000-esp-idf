@@ -50,11 +50,16 @@ typedef void (*dw1000_handler_t)(void);
 /* ============================ init / probe ============================ */
 
 /*
- * Initialise the SPI bus, reset and select the DW1000.
+ * Initialise the SPI bus.
+ * Call this once before any spi device configuration.
+ */
+esp_err_t spi_init(uint8_t sck, uint8_t miso, uint8_t mosi);
+
+/*
+ * Reset and select the DW1000.
  * Call this once before any other function.
  */
-bool dw1000_init(uint8_t sck, uint8_t miso, uint8_t mosi,
-                 uint8_t cs, uint8_t irq, uint8_t rst,  
+bool dw1000_init(uint8_t cs, uint8_t irq, uint8_t rst,  
                  uint16_t network_id,
                  uint16_t device_address,
                  const uint8_t mode[3],

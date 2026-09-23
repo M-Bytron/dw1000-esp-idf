@@ -402,7 +402,7 @@ static void send_pair_response(uint64_t target_id, uint32_t request_msg_id)
     pkt.payloadLength = 1;
     pkt.payload[0] = s_device_role;  // Use the static variable
     send_packet(&pkt);
-    ESP_LOGI(TAG, "PAIR_RESPONSE -> %s (msg %u) as role %c", 
+    ESP_LOGI(TAG, "PAIR_RESPONSE -> %s (msg %lu) as role %c", 
              format_id(target_id), request_msg_id, s_device_role);
 }
 

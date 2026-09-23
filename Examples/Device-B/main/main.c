@@ -19,17 +19,15 @@
  */
 #include <stdio.h>
 #include <stdint.h>
-
 #include "esp_log.h"
 #include "esp_mac.h"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
 #include "my_dw1000.h"
 #include "lora.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+
 /* ------------------------- wiring ------------------------- */
 // ----- for ESP32
 // const uint8_t PIN_SCK  = 25;
@@ -39,24 +37,17 @@
 // const uint8_t PIN_IRQ  = 13;
 // const uint8_t PIN_RST  = 32;
 
-// ----- for ESP32S3
+// ----- for ESP32S3 ------
+// --- DW1000 -------------
 const uint8_t PIN_SCK  = 12;
 const uint8_t PIN_MISO = 13;
 const uint8_t PIN_MOSI = 11;
-
 const uint8_t PIN_CS   = 10;
 const uint8_t PIN_IRQ  = 14;
 const uint8_t PIN_RST  = 9;
-
+// --- LoRa ---------------
 const uint8_t LORA_SS  = 46;
 const uint8_t LORA_RST  = 3;
-
-// const uint8_t PIN_SCK  = 7;
-// const uint8_t PIN_MISO = 8;
-// const uint8_t PIN_MOSI = 6;
-// const uint8_t PIN_CS   = 5;
-// const uint8_t PIN_IRQ  = 9;
-// const uint8_t PIN_RST  = 4;
 
 /* ------------------- shared radio settings -------------------
    The PAN, channel and mode MUST match on both boards. */
@@ -67,9 +58,7 @@ uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
    printed at boot as "My BLE MAC: ..."). Device B uses Device A's MAC. */
-static const uint8_t peer_eui[6] = {0x28, 0x05, 0xA5, 0x2A, 0x66, 0xCE};
-
-#include "driver/spi_master.h"
+static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE2, 0xF1, 0x56};
 
 /* -------------------------- task --------------------------- */
 static void dw1000_radio_task(void *arg)
@@ -83,21 +72,14 @@ static void dw1000_radio_task(void *arg)
                  (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
     }
     
-    spi_bus_config_t bus = {
-        .mosi_io_num = PIN_MOSI,
-        .miso_io_num = PIN_MISO,
-        .sclk_io_num = PIN_SCK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 0, // LORA
-        // .max_transfer_sz   = 1024,   //DW1000
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO));
+    // ----- SPI init (required for DW1000) -----
+    spi_init(PIN_SCK, PIN_MISO, PIN_MOSI);
 
+    // ----- LoRa init (optional, for debugging) -> comment out if not used
+    // lora_init(LORA_SS,LORA_RST,PIN_MOSI,PIN_MISO,PIN_SCK);
 
-    lora_init(LORA_SS,LORA_RST,PIN_MOSI,PIN_MISO,PIN_SCK);
-    /* Init SPI bus + reset + LDE microcode load */
-    dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST,
+    // ----- DW1000 Init: Init reset + LDE microcode load
+    dw1000_init(PIN_CS, PIN_IRQ, PIN_RST,
                  MY_PAN_ID, MY_SHORT_ADDR,
                   DW1000_MODE_LONGDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, antenna_delay);

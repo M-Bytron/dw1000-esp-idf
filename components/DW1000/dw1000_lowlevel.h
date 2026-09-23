@@ -23,7 +23,7 @@ extern "C" {
  * starts at 2 MHz). Call once before any register access.
  * Returns ESP_OK on success (also OK if already initialised).
  */
-esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs);
+esp_err_t dw1000_ll_spi_init(uint8_t cs);
 
 /*
  * Read `n` bytes from a register. Use DW1000_NO_SUB (from dw1000_regs.h) as

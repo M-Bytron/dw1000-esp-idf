@@ -50,7 +50,7 @@ uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
    printed at boot as "My BLE MAC: ..."). Device A uses Device B's MAC. */
-static const uint8_t peer_eui[6] = {0x3C, 0x61, 0x05, 0x12, 0xC9, 0x4A};
+static const uint8_t peer_eui[6] = {0xD8, 0x3B, 0xDA, 0x59, 0x8E, 0xB2};
 
 /* ------------------------- callback ------------------------ */
 static bool on_distance(float distance_m, bool got_reading)
@@ -75,8 +75,11 @@ static void dw1000_radio_task(void *arg)
                  (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
     }
 
-    /* init SPI bus + reset + LDE microcode load */
-    dw1000_init(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS, PIN_IRQ, PIN_RST,
+    // ----- SPI init (required for DW1000) -----
+    spi_init(PIN_SCK, PIN_MISO, PIN_MOSI);
+
+    // ----- DW1000 Init: Init reset + LDE microcode load
+    dw1000_init(PIN_CS, PIN_IRQ, PIN_RST,
                  MY_PAN_ID, MY_SHORT_ADDR,
                   DW1000_MODE_LONGDATA_FAST_ACCURACY,
                   DW1000_CHANNEL_5, antenna_delay);

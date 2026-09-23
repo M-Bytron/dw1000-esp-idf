@@ -48,7 +48,7 @@ static volatile uint32_t s_spi_err_count = 0;
 #define DW1000_SPI_CLK_SLOW 2000000   /* 2 MHz, used while on XTI clock  */
 #define DW1000_SPI_CLK_FAST 16000000  /* 16 MHz, used on PLL/AUTO clock  */
 
-esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs)
+esp_err_t dw1000_ll_spi_init(uint8_t cs)
 {
     esp_err_t ret;
 
@@ -59,19 +59,7 @@ esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs
         }
     }
 
-    spi_bus_config_t buscfg = {
-        .sclk_io_num       = sck,
-        .mosi_io_num       = mosi,
-        .miso_io_num       = miso,
-        .quadwp_io_num     = -1,
-        .quadhd_io_num     = -1,
-        .max_transfer_sz   = 1024,
-    };
-    ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "spi_bus_initialize failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    // spi init was there before
 
     spi_device_interface_config_t devcfg = {
         .mode            = 2,                  /* CPOL=0, CPHA=0, MSB first */
@@ -86,9 +74,7 @@ esp_err_t dw1000_ll_spi_init(uint8_t sck, uint8_t miso, uint8_t mosi, uint8_t cs
         ESP_LOGE(TAG, "spi_bus_add_device failed: %s", esp_err_to_name(ret));
         return ret;
     }
-
-    ESP_LOGI(TAG, "SPI master ready (sck=%u miso=%u mosi=%u cs=%u, 2 MHz)",
-             (unsigned)sck, (unsigned)miso, (unsigned)mosi, (unsigned)cs);
+    
     return ESP_OK;
 }
 
@@ -1406,7 +1392,7 @@ static SemaphoreHandle_t s_irq_sem = NULL;
  *
  * Set to 0 to compile the trace out completely.
  * ---------------------------------------------------------------------- */
-#define DW1000_IRQ_TRACE_RUNS 0
+#define DW1000_IRQ_TRACE_RUNS 50
 
 #if DW1000_IRQ_TRACE_RUNS > 0
 static int s_trace_left = DW1000_IRQ_TRACE_RUNS;
