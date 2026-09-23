@@ -60,9 +60,16 @@ esp_err_t dw1000_ll_spi_init(uint8_t cs)
     }
 
     // spi init was there before
+#if CONFIG_IDF_TARGET_ESP32
+    uint8_t spi_mode = 0;
+#elif CONFIG_IDF_TARGET_ESP32S3
+    uint8_t spi_mode = 2;
+#else
+    uint8_t spi_mode = 0;
+#endif
 
     spi_device_interface_config_t devcfg = {
-        .mode            = 0,                  /* CPOL=0, CPHA=0, MSB first */
+        .mode            = spi_mode,                  /* CPOL=0, CPHA=0, MSB first */
         .clock_speed_hz  = 1E6,
         .spics_io_num    = cs,
         .queue_size      = 4,
