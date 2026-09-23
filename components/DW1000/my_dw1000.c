@@ -88,6 +88,12 @@ static QueueHandle_t s_rx_queue = NULL;
 static TaskHandle_t  s_tx_task_h = NULL;
 static TaskHandle_t  s_rx_task_h = NULL;
 
+/* Timestamp of the last frame that actually completed (40-bit DW1000 TX_TIME,
+   antenna-delay corrected). ONLY the TX task can fill this in, because TX_TIME
+   is valid only after the TXFRS event. The RX task uses it as T1 (tag) / T3
+   (anchor) of the DS-TWR exchange. 0 = no transmit succeeded yet. */
+static volatile uint64_t s_last_tx_ts = 0;
+
 /* TX statistics (written by the TX task, reported on failures) */
 static volatile uint32_t s_tx_sent    = 0;
 static volatile uint32_t s_tx_timeout = 0;
@@ -173,9 +179,15 @@ bool dw1000_init(uint8_t cs, uint8_t irq, uint8_t rst,
         return false;
     }
     xTaskCreate(dw1000_rx_task, "dw1000_rx", 4096, NULL, 12, &s_rx_task_h);
-    xTaskCreate(dw1000_tx_task, "dw1000_tx", 4096, NULL, 10, &s_tx_task_h);
+    /* The TX task MUST outrank the RX task: a frame armed with an absolute TX
+       time has to reach the radio BEFORE that time passes, and the RX task
+       spends milliseconds in the UART (ESP_LOGI) while it handles a frame.
+       With the TX task below the RX task the radio was armed after the
+       scheduled time had passed, so the reply left immediately instead of at
+       the moment the ranging math assumed. */
+    xTaskCreate(dw1000_tx_task, "dw1000_tx", 4096, NULL, 14, &s_tx_task_h);
     // xTaskCreate(dw1000_stats_task, "dw1000_txs", 3072, NULL, 1, NULL);
-    ESP_LOGI(TAG, "TX/RX tasks started (tx=10, rx=12)");
+    ESP_LOGI(TAG, "TX/RX tasks started (tx=14, rx=12)");
 
     ESP_LOGI(TAG, "Register DW1000 Callback Registered");
     dw1000_on_received(my_dw1000_on_received);
@@ -683,8 +695,8 @@ void dw1000_get_temp_and_vbat(float *temp_c, float *vbat_v)
 /* ranging state (file scope) */
 static uint8_t  s_data[DW1000_HDR_LEN + DW1000_LEN_DATA];
 static uint8_t  s_last_sent_type;      /* tag: which frame was just transmitted */
-static uint64_t s_t1;                  /* tag: poll TX timestamp */
-static uint64_t s_t2, s_t3;            /* anchor: poll RX, poll_ack TX timestamp */
+static uint64_t s_t1;                  /* tag: poll TX timestamp (measured)   */
+static uint64_t s_t2;                  /* anchor: poll RX timestamp (measured) */
 static volatile bool s_result_ready;   /* true when a RANGE_REPORT arrived */
 static float  s_last_distance;         /* last measured distance (m) */
 static bool   s_tag_init_done;         /* run_tag radio setup done once */
@@ -757,12 +769,11 @@ static int64_t diff_ts(uint64_t later, uint64_t earlier)
 
 /* ---------------- tag side ---------------- */
 
-static void tag_on_sent(void)
-{
-    if (s_last_sent_type == DW1000_MSG_POLL) {
-        s_t1 = dw1000_get_tx_timestamp();
-    }
-}
+/* NOTE: T1 is not taken from a "sent" callback. A callback runs in the IRQ
+   task and would store the timestamp of WHATEVER frame just went out, which is
+   easy to get out of step with the exchange. Instead the TX task stores the
+   timestamp of every completed transmit in s_last_tx_ts, and the protocol code
+   reads it when it builds the frame that has to carry T1 / needs T3. */
 
 /*static void tag_on_received(void)
 {
@@ -832,10 +843,10 @@ bool dw1000_run_tag(int irq_gpio, int timeout_ms, dw1000_distance_cb_t on_distan
         s_tag_init_done = true;
         dw1000_irq_start(irq_gpio);
         dw1000_receive_permanently(true);
-        // dw1000_on_sent(tag_on_sent);
-        if (s_last_sent_type == DW1000_MSG_POLL) {
-            s_t1 = dw1000_get_tx_timestamp();
-        }
+        /* T1 is NOT grabbed here any more: this block runs before the POLL is
+           even queued, so it could only ever store a stale timestamp. The TX
+           task records the real POLL transmit time and the POLL_ACK branch
+           copies it into s_t1. */
         // dw1000_on_received(my_dw1000_on_received);
     }
 
@@ -1040,7 +1051,9 @@ static void my_dw1000_on_received(void)
 /* ---------------- RX protocol (runs in the RX task) --------------------- */
 static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts)
 {
-    (void)rx_ts;   /* Stage 2 will use the captured timestamp for ranging */
+    /* rx_ts is the timestamp the IRQ task captured with this frame: it is the
+       T2/T4/T6 of the exchange and must be used instead of re-reading RX_TIME
+       (which may already belong to a newer frame). */
     if (len > sizeof(s_data)) {
         len = sizeof(s_data);
     }
@@ -1086,11 +1099,13 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
     if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL) {
         // reply after REPLY_DELAY_US; the actual reply time is measured 
         ESP_LOGI(TAG, "DW1000_MSG_POLL");
-        s_t2 = dw1000_get_rx_timestamp();
+        /* T2 = POLL RX timestamp. Use the one the IRQ task captured together
+           with the frame; re-reading RX_TIME here can return a newer frame. */
+        s_t2 = rx_ts;
         uint64_t now = dw1000_get_system_timestamp();
         uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
-        // + antenna delay: the TX timestamp must be antenna-referenced (like TX_TIME) 
-        s_t3 = (target & ~0x1FFULL) + (uint64_t)dw1000_get_antenna_delay();
+        /* T3 is NOT predicted here: the TX task measures the real transmit time
+           of the POLL_ACK once it is on air (s_last_tx_ts). */
 
         memset(s_data, 0, sizeof(s_data));
         s_data[DW1000_OFF_TYPE] = DW1000_MSG_POLL_ACK;
@@ -1099,7 +1114,19 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_POLL_ACK) {
         ESP_LOGI(TAG, "DW1000_MSG_POLL_ACK");
         // anchor replied: send RANGE with T1 (poll), T4 (ack rx), T5 (range) 
-        uint64_t t4 = dw1000_get_rx_timestamp();
+        /* T1 = the REAL transmit time of our POLL, captured by the TX task when
+           TXFRS arrived. It must never be 0 or stale: round1 = T4 - T1 would
+           then be ~2^40 ticks, round1*round2 overflows int64 and the finished
+           DS-TWR result is arbitrary - that is what produced distances of tens
+           of thousands of kilometres. */
+        dw1000_ll_radio_lock();
+        s_t1 = s_last_tx_ts;
+        dw1000_ll_radio_unlock();
+        if (s_t1 == 0) {
+            ESP_LOGW(TAG, "RANGE: no POLL TX timestamp - the distance will be wrong");
+        }
+        /* T4 = POLL_ACK RX timestamp, captured with this frame. */
+        uint64_t t4 = rx_ts;
         uint64_t now = dw1000_get_system_timestamp();
         uint64_t target = now + (uint64_t)((float)DW1000_REPLY_DELAY_US * 63897.6f);
         // + antenna delay: TX times must be antenna-referenced (like setDelay/TX_TIME) 
@@ -1115,21 +1142,37 @@ static void dw1000_process_rx(const uint8_t *frame, uint16_t len, uint64_t rx_ts
         dw1000_send_at_ticks(s_data, DW1000_HDR_LEN + DW1000_LEN_DATA, target);
     } else if (s_data[DW1000_OFF_TYPE] == DW1000_MSG_RANGE) {
         ESP_LOGI(TAG, "DW1000_MSG_RANGE");
-        // we have T2/T3; RANGE carries T1/T4/T5; measure T6 now 
+        /* T1/T4/T5 come from the tag, T2 was captured when the POLL arrived and
+           T6 is captured with this RANGE frame. T3 is the REAL POLL_ACK
+           transmit time measured by the TX task - never a prediction. All six
+           timestamps are now readings of the chip's own counters. */
         uint64_t t1 = get_ts(s_data + DW1000_OFF_T1);
         uint64_t t4 = get_ts(s_data + DW1000_OFF_T4);
         uint64_t t5 = get_ts(s_data + DW1000_OFF_T5);
-        uint64_t t6 = dw1000_get_rx_timestamp();
+        uint64_t t6 = rx_ts;
+        dw1000_ll_radio_lock();
+        uint64_t t3 = s_last_tx_ts;
+        dw1000_ll_radio_unlock();
+        if (t3 == 0) {
+            ESP_LOGW(TAG, "RANGE: no POLL_ACK TX timestamp - the result will be wrong");
+        }
 
         // asymmetric DS-TWR (arduino-dw1000 computeRangeAsymmetric) 
         int64_t round1 = diff_ts(t4, t1);      // tag:   poll -> ack rx 
-        int64_t reply1 = diff_ts(s_t3, s_t2);  // anchor: poll rx -> ack tx 
-        int64_t round2 = diff_ts(t6, s_t3);    // anchor: ack tx -> range rx 
+        int64_t reply1 = diff_ts(t3, s_t2);    // anchor: poll rx -> ack tx 
+        int64_t round2 = diff_ts(t6, t3);      // anchor: ack tx -> range rx 
         int64_t reply2 = diff_ts(t5, t4);      // tag:   ack rx -> range tx 
         int64_t num = round1 * round2 - reply1 * reply2;
         int64_t den = round1 + round2 + reply1 + reply2;
         int64_t tof = (den != 0) ? (num / den) : 0;
         float range = (float)tof * DW1000_METERS_PER_TICK;
+
+        /* Sanity view of the exchange (all values in ticks, 1 tick = 15.65 ps):
+           round1 ~ round2 and reply1 ~ reply2 within the crystal offset, and
+           |tof| of a few hundred ticks for a few metres. */
+        ESP_LOGI(TAG, "RANGE times: round1=%lld reply1=%lld round2=%lld reply2=%lld tof=%lld ticks",
+                 (long long)round1, (long long)reply1, (long long)round2,
+                 (long long)reply2, (long long)tof);
         s_last_distance = range;   // remember so calibration can use it 
 
         ESP_LOGI(TAG, "RANGE OK: %.2f m", (double)range);
@@ -1252,8 +1295,16 @@ static void dw1000_tx_task(void *arg)
         /* Wait OUTSIDE the lock: the IRQ task needs it to report TXFRS. */
         if (dw1000_ll_tx_done_wait(DW1000_TX_DONE_TIMEOUT_MS)) {
             s_tx_sent++;
+            /* TXFRS arrived, so TX_TIME now holds the timestamp of the frame
+               we just put on air (40-bit, antenna-delay corrected). Capture it
+               - this is the only moment that value is valid, and it is the
+               real T1 (tag) / T3 (anchor) of the ranging exchange. */
+            dw1000_ll_radio_lock();
+            s_last_tx_ts = dw1000_ll_get_transmit_timestamp();
+            dw1000_ll_radio_unlock();
         } else {
             s_tx_timeout++;
+            s_last_tx_ts = 0;   /* nothing was sent: no usable TX timestamp */
             ESP_LOGW(TAG, "TX: no TXFRS within %d ms (len=%u, timeouts=%u)",
                      DW1000_TX_DONE_TIMEOUT_MS, (unsigned)job.len,
                      (unsigned)s_tx_timeout);

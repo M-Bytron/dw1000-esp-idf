@@ -58,7 +58,7 @@ uint16_t antenna_delay = 16464;   /* calibrated value - same on BOTH boards */
 /* ------------------------- pairing -------------------------
    Pair with the OTHER module using ITS ESP32 BLE MAC (6 bytes, MSB first,
    printed at boot as "My BLE MAC: ..."). Device B uses Device A's MAC. */
-static const uint8_t peer_eui[6] = {0xD4, 0x8C, 0x49, 0xE2, 0xF1, 0x56};
+static const uint8_t peer_eui[6] = {0x3C, 0x61, 0x05, 0x12, 0xC9, 0x4A};
 
 /* -------------------------- task --------------------------- */
 static void dw1000_radio_task(void *arg)

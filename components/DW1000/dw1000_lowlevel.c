@@ -62,7 +62,7 @@ esp_err_t dw1000_ll_spi_init(uint8_t cs)
     // spi init was there before
 
     spi_device_interface_config_t devcfg = {
-        .mode            = 2,                  /* CPOL=0, CPHA=0, MSB first */
+        .mode            = 0,                  /* CPOL=0, CPHA=0, MSB first */
         .clock_speed_hz  = 1E6,
         .spics_io_num    = cs,
         .queue_size      = 4,
@@ -1392,7 +1392,7 @@ static SemaphoreHandle_t s_irq_sem = NULL;
  *
  * Set to 0 to compile the trace out completely.
  * ---------------------------------------------------------------------- */
-#define DW1000_IRQ_TRACE_RUNS 50
+#define DW1000_IRQ_TRACE_RUNS 0
 
 #if DW1000_IRQ_TRACE_RUNS > 0
 static int s_trace_left = DW1000_IRQ_TRACE_RUNS;
